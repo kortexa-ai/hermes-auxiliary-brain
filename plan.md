@@ -102,11 +102,12 @@ without changing the plugin.
   - Model-ID mismatch fails before completion or database writes.
   - Installer dry-run and install/enable paths pass against temporary profiles.
 
-- [ ] **8. Publish the Sparta build**
-  - Review diff and confirm no secrets or personal details are present.
-  - Commit directly to `main`.
-  - Create public `kortexa-ai/hermes-auxiliary-brain` with `origin` configured.
-  - Push `main`, verify the remote tree and default branch.
+- [x] **8. Publish the Sparta build**
+  - Reviewed the complete diff and confirmed no secrets or personal tracking
+    details are present.
+  - Committed directly to `main` under the agreed Sparta workflow.
+  - Created public `kortexa-ai/hermes-auxiliary-brain` and configured `origin`.
+  - Pushed `main`; GitHub reports it as the public default branch.
 
 ## Acceptance criteria for v0.1.0
 
@@ -155,3 +156,5 @@ without changing the plugin.
 - 2026-07-16: Made authenticated discovery fail closed: when a local endpoint
   token is configured, the operator must name the exact loopback base URL, so
   the token is never sprayed across unrelated local services.
+- 2026-07-16: Published the initial build to
+  `https://github.com/kortexa-ai/hermes-auxiliary-brain` on `main`.
