@@ -368,5 +368,7 @@ without changing the plugin.
   oversized unknown actions, added profile-scoped secret resolution and
   multiplex fail-closed behavior, then passed the complete local suite plus a
   fresh-profile install/enable/register/disable smoke test. The remote Python
-  3.11/3.12/3.13 matrix and lint job passed; `v0.4.0` is ready to tag and
-  publish. The release raccoon has traded its helmet for a tiny clipboard.
+  3.11/3.12/3.13 matrix and lint job passed, the annotated `v0.4.0` tag and
+  GitHub Release were published, and a fresh native Git install loaded the
+  exact release commit, default-off gate, acknowledged enable, and `/brain`
+  help. The release raccoon has traded its helmet for a tiny clipboard.
