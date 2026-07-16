@@ -116,7 +116,7 @@ without changing the plugin.
   - GitHub Actions passed tests on Python 3.11, 3.12, and 3.13 plus Ruff lint
     and format checks.
 
-- [ ] **10. Ship the one-command local server (`v0.2.0`)** - in progress
+- [x] **10. Ship the one-command local server (`v0.2.0`)**
   - [x] Implement a profile-local llama.cpp manager for Windows, macOS, and
     Ubuntu Linux on x64 and arm64.
   - [x] Pin llama.cpp `b10046`; verify the selected release asset's size and
@@ -131,9 +131,9 @@ without changing the plugin.
   - [x] Wire `hermes brain server install|start|status|stop` into the plugin CLI.
   - [x] Configure the auxiliary-brain endpoint only after the server is ready
     and reports the requested model.
-  - [ ] Finish operator documentation, the complete test pass, and an isolated
+  - [x] Finish operator documentation, the complete test pass, and an isolated
     install-from-GitHub smoke test.
-  - [ ] Tag and publish `v0.1.0`, then tag and publish `v0.2.0` with release notes.
+  - [x] Tag and publish `v0.1.0`, then tag and publish `v0.2.0` with release notes.
 
 - [ ] **11. Make operation and diagnosis obvious (`v0.3.0`)** - in progress
   - Keep `status` as the quick read-only snapshot. Expand it to show the plugin
@@ -320,3 +320,7 @@ without changing the plugin.
   the generic busy-session plugin/skill command gap, so no duplicate Hermes
   branch or PR was opened. Committed authenticated status/check-in API work to
   v0.3.0 and moved both training status and bundle preparation to v0.5.0.
+- 2026-07-16: Completed v0.2.0: `hermes brain server start` now installs the
+  pinned llama.cpp build when needed, waits for the default LFM model, verifies
+  its identity, and only then saves configuration. All 155 tests passed, and a
+  clean Hermes Git install exposed the full managed-server command tree.
