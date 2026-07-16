@@ -37,6 +37,7 @@ class BrainConfig:
     timeout_seconds: float = 8.0
     discovery_timeout_seconds: float = 0.75
     max_input_chars: int = 8_000
+    gateway_slash_enabled: bool = False
 
     def __post_init__(self) -> None:
         mode = self.mode.strip().lower()
@@ -87,6 +88,7 @@ class BrainConfig:
             "timeout_seconds": self.timeout_seconds,
             "discovery_timeout_seconds": self.discovery_timeout_seconds,
             "max_input_chars": self.max_input_chars,
+            "gateway_slash_enabled": self.gateway_slash_enabled,
         }
         if redact_secrets and value["api_key"]:
             value["api_key"] = "***"
@@ -112,13 +114,14 @@ class BrainConfig:
             "timeout_seconds",
             "discovery_timeout_seconds",
             "max_input_chars",
+            "gateway_slash_enabled",
         }
         unknown = sorted(set(raw) - known)
         if unknown:
             raise ConfigError(f"unknown setting(s): {', '.join(unknown)}")
 
         values = dict(raw)
-        for key in ("auto_discover", "capture"):
+        for key in ("auto_discover", "capture", "gateway_slash_enabled"):
             if key in values:
                 values[key] = _coerce_bool(values[key], key)
         for key in ("timeout_seconds", "discovery_timeout_seconds"):

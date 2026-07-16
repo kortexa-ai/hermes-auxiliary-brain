@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
+import inspect
 import json
 import logging
-import os
 from pathlib import Path
 from typing import Any
 
@@ -22,12 +23,49 @@ from .llama_server import (
     start_llama_server,
     stop_llama_server,
 )
-from .local_api import DEFAULT_ENDPOINTS, discover_endpoint, probe_endpoint
-from .runtime import API_KEY_ENV, AUXILIARY_TASK_KEY, BrainRuntime, BrainRuntimeError
+from .local_api import (
+    DEFAULT_ENDPOINTS,
+    discover_endpoint,
+    probe_endpoint,
+    redact_secret,
+    redact_tree,
+)
+from .runtime import (
+    API_KEY_ENV,
+    AUXILIARY_TASK_KEY,
+    REMOTE_INPUT_MAX_CHARS,
+    BrainRuntime,
+    BrainRuntimeError,
+    resolve_api_key,
+)
 from .tasks import list_tasks
 
 logger = logging.getLogger(__name__)
 RUNTIME = BrainRuntime()
+
+_GATEWAY_TASKS = {
+    "checkin": "progress_checkin",
+    "check-in": "progress_checkin",
+    "followup": "follow_up",
+    "follow-up": "follow_up",
+    "note": "research_note",
+    "extract": "generic_extract",
+}
+_GATEWAY_REQUEST_MAX_CHARS = (
+    REMOTE_INPUT_MAX_CHARS + max(len(action) for action in {*_GATEWAY_TASKS, "help", "status"}) + 1
+)
+_GATEWAY_HELP = """Hermes Auxiliary Brain (local)
+  /brain help
+  /brain status
+  /brain checkin <progress update>
+  /brain followup <commitment or message>
+  /brain note <research note>
+  /brain extract <text>
+
+The slash surface never changes models, endpoints, server state, corrections,
+exports, or training. On Hermes versions without the generic dynamic-command
+busy fix, use /brain only between turns; run `hermes brain gateway disable` to
+disable it."""
 
 
 def register(ctx: Any) -> None:
@@ -55,6 +93,26 @@ def register(ctx: Any) -> None:
         ),
     )
     ctx.register_hook("pre_llm_call", pre_llm_call)
+    register_command = getattr(ctx, "register_command", None)
+    if register_command is None:
+        logger.warning("This Hermes version cannot register plugin slash commands")
+    else:
+        command_kwargs = {
+            "name": "brain",
+            "handler": gateway_brain_command,
+            "description": "Run opt-in local auxiliary-brain tasks (idle turns only)",
+        }
+        try:
+            parameters = inspect.signature(register_command).parameters.values()
+            supports_args_hint = any(
+                parameter.name == "args_hint" or parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in parameters
+            )
+        except (TypeError, ValueError):
+            supports_args_hint = False
+        if supports_args_hint:
+            command_kwargs["args_hint"] = "[help|status|checkin|followup|note|extract] [text]"
+        register_command(**command_kwargs)
 
 
 def _brain_cli_entry(args: argparse.Namespace) -> int:
@@ -132,6 +190,19 @@ def setup_cli(parser: argparse.ArgumentParser) -> None:
     server_stop = server_sub.add_parser("stop", help="stop only the verified managed process")
     server_stop.add_argument("--timeout", type=float, default=5.0)
 
+    gateway = sub.add_parser("gateway", help="manage the opt-in /brain messaging command")
+    gateway_sub = gateway.add_subparsers(dest="gateway_command")
+    gateway_sub.add_parser("status", help="show whether /brain is enabled for the active profile")
+    gateway_enable = gateway_sub.add_parser(
+        "enable", help="enable /brain after explicitly accepting the current host limitation"
+    )
+    gateway_enable.add_argument(
+        "--acknowledge-busy-risk",
+        action="store_true",
+        help="confirm that /brain will only be sent between gateway turns",
+    )
+    gateway_sub.add_parser("disable", help="disable /brain for the active profile")
+
     status = sub.add_parser("status", help="show effective config and live health")
     status.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     doctor = sub.add_parser("doctor", help="run named checks and print concrete fixes")
@@ -194,6 +265,8 @@ def brain_command(args: argparse.Namespace) -> int:
             return 0
         if command == "server":
             return _cmd_server(args)
+        if command == "gateway":
+            return _cmd_gateway(args)
         if command == "tasks":
             for task in list_tasks():
                 print(f"{task.key:20} {task.description}")
@@ -243,9 +316,87 @@ def brain_command(args: argparse.Namespace) -> int:
     else:
         print(
             "usage: hermes brain "
-            "{setup,server,status,doctor,help,tasks,mode,run,correct,export,evaluate}"
+            "{setup,server,gateway,status,doctor,help,tasks,mode,run,correct,export,evaluate}"
         )
     return 2
+
+
+async def gateway_brain_command(raw_args: str) -> str:
+    """Run one fixed local task without handing command text to the cloud model."""
+
+    if _multiplex_gateway_active():
+        return (
+            "The local /brain command is unavailable in a multiplex-profile gateway. "
+            "Use the profile's local `hermes brain ...` CLI."
+        )
+    try:
+        enabled = await asyncio.to_thread(RUNTIME.gateway_slash_enabled)
+    except Exception as exc:
+        logger.warning("Gateway /brain profile gate failed: %s", _redact_gateway_text(str(exc)))
+        return _gateway_unavailable_message()
+    if not enabled:
+        return (
+            "The local /brain command is disabled for this profile. "
+            "Enable it on the host with `hermes brain gateway enable "
+            "--acknowledge-busy-risk`."
+        )
+
+    raw = str(raw_args or "").strip()
+    if len(raw) > _GATEWAY_REQUEST_MAX_CHARS:
+        return f"/brain input is limited to {REMOTE_INPUT_MAX_CHARS:,} characters."
+    parts = raw.split(maxsplit=1)
+    action = parts[0].lower().replace("_", "-") if parts else ""
+    payload = parts[1].strip() if len(parts) == 2 else ""
+
+    if not action or action == "help":
+        return _GATEWAY_HELP
+    if action == "status":
+        if payload:
+            return "Usage: /brain status"
+        try:
+            report = await asyncio.to_thread(RUNTIME.status, refresh=True)
+        except Exception as exc:
+            logger.warning("Gateway /brain status failed: %s", _redact_gateway_text(str(exc)))
+            return _gateway_unavailable_message()
+        return _format_gateway_status(report)
+
+    if len(payload) > REMOTE_INPUT_MAX_CHARS:
+        return f"/brain input is limited to {REMOTE_INPUT_MAX_CHARS:,} characters."
+    task_key = _GATEWAY_TASKS.get(action)
+    if task_key is None:
+        return f"Unknown /brain action.\n\n{_GATEWAY_HELP}"
+    if not payload:
+        return f"Usage: /brain {action} <text>"
+
+    try:
+        result = await asyncio.to_thread(
+            RUNTIME.run,
+            task_key,
+            payload,
+            source="gateway-slash",
+        )
+    except Exception as exc:
+        logger.warning("Gateway /brain %s failed: %s", action, _redact_gateway_text(str(exc)))
+        return _gateway_unavailable_message()
+    return _format_gateway_result(task_key, result)
+
+
+def _gateway_unavailable_message() -> str:
+    return (
+        "The local auxiliary brain is unavailable. "
+        "Run `hermes brain doctor` on the host for details."
+    )
+
+
+def _multiplex_gateway_active() -> bool:
+    try:
+        from agent.secret_scope import is_multiplex_active
+    except (ImportError, ModuleNotFoundError):
+        return False
+    try:
+        return bool(is_multiplex_active())
+    except Exception:
+        return True
 
 
 def pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
@@ -297,7 +448,7 @@ def pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
 
 
 def _cmd_setup(args: argparse.Namespace) -> int:
-    api_key = os.environ.get(API_KEY_ENV) or None
+    api_key = resolve_api_key()
     try:
         current = RUNTIME.config()
     except BrainRuntimeError:
@@ -350,6 +501,32 @@ def _cmd_setup(args: argparse.Namespace) -> int:
         print(f"  auth     : {API_KEY_ENV} from environment")
     print("\nNext: hermes brain doctor")
     return 0
+
+
+def _cmd_gateway(args: argparse.Namespace) -> int:
+    action = getattr(args, "gateway_command", None)
+    if action == "status":
+        enabled = RUNTIME.gateway_slash_enabled()
+        state = "enabled" if enabled else "disabled"
+        print(f"Gateway /brain is {state} for the active profile.")
+        print("Use /brain only between turns until Hermes merges the busy-command fix.")
+        print("The setting applies to the active profile and is read on every invocation.")
+        return 0
+    if action == "enable":
+        if not args.acknowledge_busy_risk:
+            raise BrainRuntimeError(
+                "enabling /brain currently requires --acknowledge-busy-risk; "
+                "the command must only be sent between gateway turns"
+            )
+        RUNTIME.set_gateway_slash_enabled(True)
+        print("Gateway /brain enabled for the active profile.")
+        print("Use /brain only between turns on current Hermes.")
+        return 0
+    if action == "disable":
+        RUNTIME.set_gateway_slash_enabled(False)
+        print("Gateway /brain disabled for the active profile.")
+        return 0
+    raise BrainRuntimeError("choose a gateway action: status, enable, or disable")
 
 
 def _cmd_server(args: argparse.Namespace) -> int:
@@ -445,6 +622,64 @@ def _format_result(result: Any) -> str:
     )
 
 
+def _format_gateway_result(task_key: str, result: Any) -> str:
+    secret = _gateway_secret()
+    output = json.dumps(
+        redact_tree(result.output, secret),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    rendered = f"Auxiliary brain `{task_key}` ({result.latency_ms:g} ms)\n```json\n{output}\n```"
+    return _redact_gateway_text(rendered)
+
+
+def _format_gateway_status(status: dict[str, Any]) -> str:
+    plugin = status.get("plugin") or {}
+    config = status.get("config") or {}
+    endpoint = status.get("endpoint") or {}
+    server = status.get("server") or {}
+    if not config.get("valid"):
+        return _redact_gateway_text(
+            f"Hermes Auxiliary Brain {plugin.get('version', '')}\n"
+            "Configuration: invalid\n"
+            "Run `hermes brain doctor` on the host."
+        )
+    reachable = bool(endpoint.get("reachable"))
+    model = endpoint.get("model") or config.get("model") or "not selected"
+    ownership = server.get("configured_endpoint_ownership") or "unknown"
+    if ownership == "managed":
+        server_state = (
+            "ready" if server.get("ready") else "running" if server.get("running") else "stopped"
+        )
+    else:
+        server_state = ownership
+    return _redact_gateway_text(
+        "\n".join(
+            [
+                f"Hermes Auxiliary Brain {plugin.get('version', '')}",
+                f"Mode: {config.get('mode')}",
+                f"Capture: {'on' if config.get('capture') else 'off'}",
+                f"Endpoint: {'reachable' if reachable else 'unavailable'}",
+                f"Model: {model}",
+                f"Server: {server_state}",
+                "Gateway slash: enabled (idle-only compatibility mode)",
+            ]
+        )
+    )
+
+
+def _redact_gateway_text(value: str) -> str:
+    return redact_secret(value, _gateway_secret())
+
+
+def _gateway_secret() -> str | None:
+    try:
+        return resolve_api_key()
+    except BrainRuntimeError:
+        return None
+
+
 def _format_status(status: dict[str, Any]) -> str:
     endpoint = status["endpoint"]
     config = status["config"]
@@ -465,6 +700,8 @@ def _format_status(status: dict[str, Any]) -> str:
                 f"  configured : {config.get('base_url') or 'auto-discovery'}",
                 f"  model      : {config.get('model') or 'not selected'}",
                 f"  auth       : {'present (hidden)' if auth.get('configured') else 'keyless'}",
+                "  /brain     : "
+                f"{'enabled (idle-only)' if config.get('gateway_slash_enabled') else 'disabled'}",
             ]
         )
     else:

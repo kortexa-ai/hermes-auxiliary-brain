@@ -20,6 +20,8 @@ from .local_api import (
     OpenAICompatibleClient,
     discover_endpoint,
     probe_endpoint,
+    redact_secret,
+    redact_tree,
 )
 from .store import BrainStore, PredictionRecord
 from .tasks import BASE_INSTRUCTION, TaskParseError, get_task
@@ -29,6 +31,7 @@ PLUGIN_ID = "auxiliary-brain"
 PLUGIN_VERSION = __version__
 AUXILIARY_TASK_KEY = "auxiliary_brain_reflex"
 API_KEY_ENV = "AUXILIARY_BRAIN_API_KEY"
+REMOTE_INPUT_MAX_CHARS = 8_000
 
 
 class BrainRuntimeError(RuntimeError):
@@ -59,16 +62,8 @@ class BrainRuntime:
     def config(self) -> BrainConfig:
         """Load the active Hermes profile's plugin and auxiliary-task settings."""
 
-        try:
-            from hermes_cli.config import load_config
-
-            root = load_config() or {}
-        except Exception as exc:  # pragma: no cover - host import failure
-            raise BrainRuntimeError(f"cannot read Hermes config: {exc}") from exc
-
-        entries = _mapping(_mapping(root.get("plugins")).get("entries"))
-        entry = _mapping(entries.get(PLUGIN_ID))
-        settings = dict(_mapping(entry.get("config")))
+        root = _load_hermes_config()
+        settings = _plugin_settings(root)
 
         # Endpoint routing belongs to Hermes' registered auxiliary task.  Keep
         # credentials out of config.yaml; the optional key comes from .env.
@@ -92,10 +87,20 @@ class BrainRuntime:
         if route.get("timeout") is not None:
             settings["timeout_seconds"] = route["timeout"]
         settings.pop("api_key", None)
-        settings["api_key"] = os.environ.get(API_KEY_ENV) or None
+        settings["api_key"] = resolve_api_key()
 
         try:
             return BrainConfig.from_mapping(settings)
+        except (TypeError, ValueError) as exc:
+            raise BrainRuntimeError(f"invalid auxiliary-brain config: {exc}") from exc
+
+    def gateway_slash_enabled(self) -> bool:
+        """Read only the active profile's slash opt-in, failing closed on bad config."""
+
+        try:
+            return BrainConfig.from_mapping(
+                _plugin_settings(_load_hermes_config())
+            ).gateway_slash_enabled
         except (TypeError, ValueError) as exc:
             raise BrainRuntimeError(f"invalid auxiliary-brain config: {exc}") from exc
 
@@ -113,6 +118,8 @@ class BrainRuntime:
     ) -> BrainConfig:
         """Atomically persist behavior and auxiliary routing without credentials."""
 
+        raw, config_path = _read_raw_config_strict()
+        behavior = _plugin_behavior(raw)
         candidate = BrainConfig(
             mode=mode,
             base_url=base_url,
@@ -122,23 +129,10 @@ class BrainRuntime:
             timeout_seconds=timeout_seconds,
             discovery_timeout_seconds=discovery_timeout_seconds,
             max_input_chars=max_input_chars,
+            gateway_slash_enabled=BrainConfig.from_mapping(
+                {"gateway_slash_enabled": behavior.get("gateway_slash_enabled", False)}
+            ).gateway_slash_enabled,
         )
-        raw, config_path = _read_raw_config_strict()
-
-        plugins = raw.setdefault("plugins", {})
-        if not isinstance(plugins, dict):
-            raise BrainRuntimeError("config.yaml plugins must be a mapping")
-        entries = plugins.setdefault("entries", {})
-        if not isinstance(entries, dict):
-            raise BrainRuntimeError("config.yaml plugins.entries must be a mapping")
-        entry = entries.setdefault(PLUGIN_ID, {})
-        if not isinstance(entry, dict):
-            raise BrainRuntimeError(f"config.yaml plugins.entries.{PLUGIN_ID} must be a mapping")
-        behavior = entry.setdefault("config", {})
-        if not isinstance(behavior, dict):
-            raise BrainRuntimeError(
-                f"config.yaml plugins.entries.{PLUGIN_ID}.config must be a mapping"
-            )
         behavior.update(
             {
                 "mode": candidate.mode,
@@ -170,13 +164,7 @@ class BrainRuntime:
         )
         route.pop("api_key", None)
 
-        try:
-            from hermes_cli.config import atomic_config_write
-
-            config_path.parent.mkdir(parents=True, exist_ok=True)
-            atomic_config_write(config_path, raw, sort_keys=False)
-        except Exception as exc:
-            raise BrainRuntimeError(f"cannot save {config_path}: {exc}") from exc
+        _write_raw_config(config_path, raw)
 
         with self._lock:
             self._probe_cache = None
@@ -186,39 +174,32 @@ class BrainRuntime:
         """Change behavior without contacting or validating the model server."""
 
         raw, config_path = _read_raw_config_strict()
-        plugins = raw.setdefault("plugins", {})
-        if not isinstance(plugins, dict):
-            raise BrainRuntimeError("config.yaml plugins must be a mapping")
-        entries = plugins.setdefault("entries", {})
-        if not isinstance(entries, dict):
-            raise BrainRuntimeError("config.yaml plugins.entries must be a mapping")
-        entry = entries.setdefault(PLUGIN_ID, {})
-        if not isinstance(entry, dict):
-            raise BrainRuntimeError(f"config.yaml plugins.entries.{PLUGIN_ID} must be a mapping")
-        behavior = entry.setdefault("config", {})
-        if not isinstance(behavior, dict):
-            raise BrainRuntimeError(
-                f"config.yaml plugins.entries.{PLUGIN_ID}.config must be a mapping"
-            )
+        behavior = _plugin_behavior(raw)
         try:
             candidate = BrainConfig.from_mapping(
                 {
                     "mode": mode,
                     "capture": behavior.get("capture", True) if capture is None else capture,
+                    "gateway_slash_enabled": behavior.get("gateway_slash_enabled", False),
                 }
             )
         except (TypeError, ValueError) as exc:
             raise BrainRuntimeError(f"invalid auxiliary-brain mode: {exc}") from exc
         behavior["mode"] = candidate.mode
         behavior["capture"] = candidate.capture
-        try:
-            from hermes_cli.config import atomic_config_write
-
-            config_path.parent.mkdir(parents=True, exist_ok=True)
-            atomic_config_write(config_path, raw, sort_keys=False)
-        except Exception as exc:
-            raise BrainRuntimeError(f"cannot save {config_path}: {exc}") from exc
+        _write_raw_config(config_path, raw)
         return candidate
+
+    def set_gateway_slash_enabled(self, enabled: bool) -> bool:
+        """Persist the opt-in gateway slash surface without contacting a model."""
+
+        if not isinstance(enabled, bool):
+            raise BrainRuntimeError("gateway slash enabled state must be true or false")
+        raw, config_path = _read_raw_config_strict()
+        behavior = _plugin_behavior(raw)
+        behavior["gateway_slash_enabled"] = enabled
+        _write_raw_config(config_path, raw)
+        return enabled
 
     def probe(self, *, refresh: bool = False) -> tuple[EndpointProbe, str]:
         cfg = self.config()
@@ -277,9 +258,13 @@ class BrainRuntime:
         model = probe.choose_model(cfg.model, strict=bool(cfg.model))
         if not model:
             if cfg.model:
-                available = ", ".join(probe.models) or "none"
+                configured_model = redact_secret(cfg.model, cfg.api_key)
+                available = (
+                    ", ".join(redact_secret(candidate, cfg.api_key) for candidate in probe.models)
+                    or "none"
+                )
                 raise BrainRuntimeError(
-                    f"configured model {cfg.model!r} is not exposed by {probe.base_url}; "
+                    f"configured model {configured_model!r} is not exposed by {probe.base_url}; "
                     f"available: {available}"
                 )
             raise BrainRuntimeError(
@@ -343,8 +328,14 @@ class BrainRuntime:
             try:
                 output = task.parse(raw)
             except TaskParseError as exc:
-                raise BrainRuntimeError(f"local model returned invalid {task_key}: {exc}") from exc
+                safe_error = redact_secret(str(exc), cfg.api_key)
+                raise BrainRuntimeError(
+                    f"local model returned invalid {task_key}: {safe_error}"
+                ) from exc
             repaired = True
+        output = redact_tree(output, cfg.api_key)
+        raw = redact_secret(raw, cfg.api_key)
+        safe_model = redact_secret(model, cfg.api_key)
         latency_ms = round((time.perf_counter() - started) * 1_000, 1)
 
         event_id = None
@@ -370,7 +361,7 @@ class BrainRuntime:
                 task_key=task_key,
                 output=output,
                 raw_output=raw,
-                model=model,
+                model=safe_model,
                 base_url=probe.base_url,
                 latency_ms=latency_ms,
             )
@@ -381,7 +372,7 @@ class BrainRuntime:
             task_key=task_key,
             output=output,
             raw_output=raw,
-            model=model,
+            model=safe_model,
             base_url=probe.base_url,
             latency_ms=latency_ms,
             event_id=event_id,
@@ -553,6 +544,65 @@ def _read_raw_config_strict() -> tuple[dict[str, Any], Path]:
     if not isinstance(value, dict):
         raise BrainRuntimeError(f"config root must be a mapping: {path}")
     return value, path
+
+
+def resolve_api_key() -> str | None:
+    """Resolve the endpoint token from Hermes' active profile secret scope."""
+
+    try:
+        from agent.secret_scope import get_secret
+    except (ImportError, ModuleNotFoundError):
+        value = os.environ.get(API_KEY_ENV)
+    else:
+        try:
+            value = get_secret(API_KEY_ENV)
+        except Exception as exc:
+            raise BrainRuntimeError(
+                "cannot resolve the active profile's auxiliary-brain endpoint credential"
+            ) from exc
+    value = str(value).strip() if value is not None else ""
+    return value or None
+
+
+def _load_hermes_config() -> Mapping[str, Any]:
+    try:
+        from hermes_cli.config import load_config
+
+        return _mapping(load_config() or {})
+    except Exception as exc:  # pragma: no cover - host import failure
+        raise BrainRuntimeError(f"cannot read Hermes config: {exc}") from exc
+
+
+def _plugin_settings(root: Mapping[str, Any]) -> dict[str, Any]:
+    entries = _mapping(_mapping(root.get("plugins")).get("entries"))
+    entry = _mapping(entries.get(PLUGIN_ID))
+    return dict(_mapping(entry.get("config")))
+
+
+def _plugin_behavior(raw: dict[str, Any]) -> dict[str, Any]:
+    plugins = raw.setdefault("plugins", {})
+    if not isinstance(plugins, dict):
+        raise BrainRuntimeError("config.yaml plugins must be a mapping")
+    entries = plugins.setdefault("entries", {})
+    if not isinstance(entries, dict):
+        raise BrainRuntimeError("config.yaml plugins.entries must be a mapping")
+    entry = entries.setdefault(PLUGIN_ID, {})
+    if not isinstance(entry, dict):
+        raise BrainRuntimeError(f"config.yaml plugins.entries.{PLUGIN_ID} must be a mapping")
+    behavior = entry.setdefault("config", {})
+    if not isinstance(behavior, dict):
+        raise BrainRuntimeError(f"config.yaml plugins.entries.{PLUGIN_ID}.config must be a mapping")
+    return behavior
+
+
+def _write_raw_config(config_path: Path, raw: dict[str, Any]) -> None:
+    try:
+        from hermes_cli.config import atomic_config_write
+
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_config_write(config_path, raw, sort_keys=False)
+    except Exception as exc:
+        raise BrainRuntimeError(f"cannot save {config_path}: {exc}") from exc
 
 
 def _mapping(value: Any) -> Mapping[str, Any]:

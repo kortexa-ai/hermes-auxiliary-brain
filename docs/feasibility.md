@@ -14,6 +14,12 @@ Plugin-first feasibility review for a trainable local auxiliary layer
 > strict local/admin surface is `hermes brain`, and `/brain` is deferred until
 > Hermes has an authenticated, busy-safe dynamic command path.
 
+> **CURRENT V0.4 STATUS** The text below preserves the original v0.1
+> feasibility snapshot. Version 0.4 adds a default-off `/brain` command for
+> single-profile gateways after explicit busy-risk acknowledgement. It is safe
+> only between turns on current Hermes and rejects multiplex-profile gateways;
+> `README.md` is the authoritative current operating contract.
+
 **Review date:** 16 July 2026
 
 **Checkout:** C:\src\hermes-agent \| branch main \| 007cd151329c

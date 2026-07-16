@@ -178,6 +178,49 @@ def test_run_repairs_one_invalid_model_response(
     assert "previous output did not satisfy" in client.calls[1]["messages"][-1]["content"]
 
 
+def test_run_redacts_endpoint_secret_from_return_and_persisted_prediction(
+    runtime: BrainRuntime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    secret = "endpoint-secret-must-not-escape"
+    config = BrainConfig(
+        mode="explicit",
+        base_url="http://127.0.0.1:1234/v1",
+        api_key=secret,
+        capture=True,
+    )
+    monkeypatch.setattr(runtime, "config", lambda: config)
+    monkeypatch.setattr(
+        runtime,
+        "probe",
+        lambda **_kwargs: (
+            EndpointProbe(
+                "http://127.0.0.1:1234/v1",
+                reachable=True,
+                models=(secret,),
+            ),
+            secret,
+        ),
+    )
+    echoed = {
+        **GENERIC_OUTPUT,
+        "summary": f"malicious echo: {secret}",
+        "fields": {secret: secret},
+    }
+    install_fake_client(monkeypatch, json.dumps(echoed))
+
+    result = runtime.run("generic_extract", "Keep credentials private", source="test")
+    prediction = runtime.store().get_prediction(result.prediction_id or "missing")
+
+    assert secret not in json.dumps(result.output)
+    assert secret not in result.raw_output
+    assert secret not in result.model
+    assert prediction is not None
+    assert secret not in json.dumps(prediction.output)
+    assert secret not in (prediction.raw_output or "")
+    assert secret not in (prediction.model or "")
+    assert "[redacted]" in json.dumps(result.output)
+
+
 def test_correction_export_and_training_record(
     runtime: BrainRuntime, monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
@@ -346,6 +389,76 @@ def test_set_mode_works_offline_and_preserves_capture_and_routing(
         "capture": False,
     }
     assert persisted["auxiliary"] == original["auxiliary"]
+
+
+def test_gateway_slash_setting_is_offline_and_preserves_existing_config(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    original = {
+        "plugins": {
+            "enabled": ["auxiliary-brain"],
+            "entries": {
+                "auxiliary-brain": {
+                    "config": {"mode": "explicit", "capture": False},
+                    "custom": "keep-me",
+                }
+            },
+        },
+        "auxiliary": {
+            "auxiliary_brain_reflex": {
+                "provider": "custom",
+                "base_url": "http://127.0.0.1:65535/v1",
+                "model": "sleeping-model",
+            }
+        },
+    }
+    install_host_config_io(monkeypatch, config_path, original)
+    monkeypatch.setattr(
+        runtime_module,
+        "probe_endpoint",
+        lambda *_args, **_kwargs: pytest.fail("gateway config changes must not probe a server"),
+    )
+    monkeypatch.setattr(
+        runtime_module,
+        "discover_endpoint",
+        lambda *_args, **_kwargs: pytest.fail("gateway config changes must not discover a server"),
+    )
+
+    runtime = BrainRuntime()
+    assert runtime.set_gateway_slash_enabled(True) is True
+    enabled = json.loads(config_path.read_text(encoding="utf-8"))
+    assert enabled["plugins"]["entries"]["auxiliary-brain"] == {
+        "config": {
+            "mode": "explicit",
+            "capture": False,
+            "gateway_slash_enabled": True,
+        },
+        "custom": "keep-me",
+    }
+    assert enabled["auxiliary"] == original["auxiliary"]
+
+    configured = runtime.save_configuration(
+        base_url="http://127.0.0.1:65535/v1",
+        model="sleeping-model",
+        mode="explicit",
+        capture=False,
+        auto_discover=False,
+    )
+    after_setup = json.loads(config_path.read_text(encoding="utf-8"))
+    assert configured.gateway_slash_enabled is True
+    assert (
+        after_setup["plugins"]["entries"]["auxiliary-brain"]["config"]["gateway_slash_enabled"]
+        is True
+    )
+    assert after_setup["plugins"]["entries"]["auxiliary-brain"]["custom"] == "keep-me"
+
+    assert runtime.set_gateway_slash_enabled(False) is False
+    disabled = json.loads(config_path.read_text(encoding="utf-8"))
+    assert (
+        disabled["plugins"]["entries"]["auxiliary-brain"]["config"]["gateway_slash_enabled"]
+        is False
+    )
 
 
 def test_probe_does_not_auto_discover_with_api_key(monkeypatch: pytest.MonkeyPatch) -> None:

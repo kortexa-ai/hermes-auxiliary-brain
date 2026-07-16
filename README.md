@@ -63,8 +63,8 @@ hermes brain server stop
 hermes brain server install --force
 ```
 
-Restart a running messaging gateway after installation if you enable the
-optional shadow or assist hook:
+Restart a running messaging gateway after installing or updating the plugin so
+the new code is loaded:
 
 ```console
 hermes gateway restart
@@ -177,7 +177,7 @@ not offered to unrelated services listening on other local ports. Keyless
 
 ## Use it
 
-The `hermes brain` command tree is the strict no-cloud boundary:
+The local `hermes brain` command tree is the strict no-cloud boundary:
 
 ```console
 hermes brain run progress_checkin "Completed a 30-minute practice session."
@@ -202,6 +202,75 @@ treats its input as data, not instructions.
 
 Use either `hermes brain --help` or `hermes brain help` for the command catalog
 and copy-paste examples installed by your version.
+
+### Messaging gateway `/brain` (explicit opt-in)
+
+Hermes can dispatch plugin slash commands while a conversation is idle, so
+v0.4.0 provides a deliberately narrow `/brain` surface for messaging gateways.
+It remains off by default because current Hermes releases have a known
+busy-session routing bug. Enable it only after reading and acknowledging that
+limitation:
+
+```console
+hermes brain gateway status
+hermes brain gateway enable --acknowledge-busy-risk
+```
+
+Once the plugin is loaded, enable/disable and mode changes are read from the
+active profile on every invocation and need no gateway restart. Send one of
+these commands through a configured messaging platform:
+
+```text
+/brain help
+/brain status
+/brain checkin Completed a planned practice session.
+/brain followup Send the revised draft by Friday.
+/brain note Record this claim and what source should verify it.
+/brain extract Pull the people, dates, claims, and open questions.
+```
+
+The four task commands are fixed mappings to the local `progress_checkin`,
+`follow_up`, `research_note`, and `generic_extract` contracts. They accept one
+nonblank input of at most 8,000 characters and do not permit a caller to choose
+another task, endpoint, model, process action, or capture setting. Status and
+errors are sanitized for a messaging surface; credentials, endpoint details,
+tracebacks, and raw server responses are not returned. `/brain help` and
+`/brain status` do not invoke either model.
+
+To turn the surface off again:
+
+```console
+hermes brain gateway disable
+```
+
+While the gateway is idle, the command remains visible but its handler is inert
+when the active profile has not opted in. Run `hermes brain gateway status`
+locally at any time to see that profile's configured state and the safety
+warning.
+
+#### Current busy-session limitation
+
+Only invoke `/brain` **between Hermes turns**, when the gateway is idle. In
+current Hermes releases, a dynamic plugin command received while an agent turn
+is running can be mistaken for ordinary follow-up text and sent to the main
+cloud model. The plugin cannot intercept that earlier host path. Queueing,
+steering, or interrupt settings do not make a busy `/brain` invocation safe.
+This happens before the plugin can check enablement, so even a disabled or
+multiplex-rejected `/brain` is not safe to send during a busy turn.
+
+The generic host fix is tracked by
+[issue #58559](https://github.com/NousResearch/hermes-agent/issues/58559) and
+[draft PR #58591](https://github.com/NousResearch/hermes-agent/pull/58591).
+Until that fix lands, the acknowledgement flag is mandatory, the default stays
+off, and the local `hermes brain ...` CLI remains the strongest privacy
+boundary. The tiny goblin can answer the door; just do not ring while Hermes is
+already juggling chainsaws.
+
+On the idle path, `/brain` currently rejects multiplex-profile gateways.
+Hermes does not yet give a process-global plugin command handler a reliable
+per-event profile config/secret scope on every multiplex route. Use each
+profile's local `hermes brain ...` CLI instead of risking a cross-profile
+mix-up; the preceding busy-path warning still applies before this rejection.
 
 ### Status and diagnosis
 
@@ -265,20 +334,8 @@ authentication receive `401`; the plugin has no second home-grown auth header.
 These routes are unavailable in a messaging-gateway-only process. Remote
 service tokens and generic run/correct APIs need a separate durable
 authentication and abuse-boundary contract and remain deferred.
-
-### Why there is no `/brain` slash command yet
-
-Hermes supports plugin slash commands, but the released gateway busy-session
-path can still treat a dynamic command received during an in-flight turn as
-ordinary follow-up text and send it to the main model. The generic host fix is
-tracked by [issue #58559](https://github.com/NousResearch/hermes-agent/issues/58559)
-and [draft PR #58591](https://github.com/NousResearch/hermes-agent/pull/58591).
-That gap makes a slash-command privacy promise impossible to keep today.
-
-The plugin therefore fails closed and does not register `/brain` yet. The
-strict local path is `hermes brain ...`. Slash read/run commands can be enabled
-in a later release after Hermes provides an authenticated, busy-safe dynamic
-command path. This is a host integration limitation, not a tiny-brain tantrum.
+Multiplex-profile remote routing is not supported by this plugin release; use
+the intended profile's local CLI.
 
 ## Operating modes
 
@@ -369,9 +426,12 @@ release uses these surfaces instead of a transparent mid-conversation router.
 - Captured inputs, predictions, corrections, and exports can be sensitive.
   They stay outside the replaceable plugin code directory, but they are still
   files on your machine and should inherit appropriate disk protections.
-- Storage is profile-wide, not per gateway user. On a multi-user gateway,
-  shadow/assist capture writes all participating users' examples into the same
-  profile database; leave those modes off unless that policy is appropriate.
+- Storage is profile-wide, not per gateway user. Every captured direct run,
+  including `/brain` and dashboard `/checkin`, plus shadow/assist capture,
+  writes into the same profile database. Plugin slash handlers receive no
+  sender/session metadata, so `/brain` rows cannot identify their author.
+  On a multi-user gateway, disable capture or use a dedicated profile unless
+  that shared, unattributed policy is appropriate.
 - Small-model output is untrusted data. The plugin does not give it tools or
   autonomous authority.
 - The research-note task organizes claims and questions; it does not verify
@@ -394,7 +454,7 @@ so `hermes plugins update auxiliary-brain` follows the latest `main`. For a
 reproducible pinned installation, clone a tag and run the checkout installer:
 
 ```console
-git clone --branch v0.3.0 --depth 1 https://github.com/kortexa-ai/hermes-auxiliary-brain.git
+git clone --branch v0.4.0 --depth 1 https://github.com/kortexa-ai/hermes-auxiliary-brain.git
 cd hermes-auxiliary-brain
 python install.py
 ```

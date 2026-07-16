@@ -16,7 +16,7 @@ from .llama_server import (
 from .llama_server import (
     resolve_data_root as resolve_llama_data_root,
 )
-from .local_api import normalize_base_url, redact_secret
+from .local_api import normalize_base_url, redact_secret, redact_tree
 from .tasks import list_tasks
 from .version import __version__
 
@@ -29,7 +29,7 @@ REPORT_SCHEMA_VERSION = 1
 def build_status_report(runtime: BrainRuntime, *, refresh: bool = False) -> dict[str, Any]:
     """Build one JSON-serializable report without leaking credentials."""
 
-    from .runtime import API_KEY_ENV, PLUGIN_ID, BrainRuntimeError
+    from .runtime import API_KEY_ENV, PLUGIN_ID, BrainRuntimeError, resolve_api_key
 
     data_root = runtime.data_root()
     profile_home = data_root.parent
@@ -47,13 +47,17 @@ def build_status_report(runtime: BrainRuntime, *, refresh: bool = False) -> dict
             "timeout_seconds": cfg.timeout_seconds,
             "discovery_timeout_seconds": cfg.discovery_timeout_seconds,
             "max_input_chars": cfg.max_input_chars,
+            "gateway_slash_enabled": cfg.gateway_slash_enabled,
             "auth": {
                 "configured": bool(cfg.api_key),
                 "source": API_KEY_ENV if cfg.api_key else None,
             },
         }
     except BrainRuntimeError as exc:
-        secret = os.environ.get(API_KEY_ENV)
+        try:
+            secret = resolve_api_key()
+        except BrainRuntimeError:
+            secret = None
         config = {
             "valid": False,
             "error": redact_secret(str(exc), secret),
@@ -165,8 +169,14 @@ def build_status_report(runtime: BrainRuntime, *, refresh: bool = False) -> dict
         "data_root": str(data_root),
         "stats": stats,
     }
-    secret = cfg.api_key if cfg is not None else os.environ.get(API_KEY_ENV)
-    return _redact_tree(report, secret)
+    if cfg is not None:
+        secret = cfg.api_key
+    else:
+        try:
+            secret = resolve_api_key()
+        except BrainRuntimeError:
+            secret = None
+    return redact_tree(report, secret)
 
 
 def build_doctor_report(runtime: BrainRuntime) -> dict[str, Any]:
@@ -361,18 +371,6 @@ def _add_check(
     fix: str | None = None,
 ) -> None:
     checks.append({"name": name, "status": status, "message": message, "fix": fix})
-
-
-def _redact_tree(value: Any, secret: str | None) -> Any:
-    if isinstance(value, str):
-        return redact_secret(value, secret)
-    if isinstance(value, dict):
-        return {key: _redact_tree(item, secret) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_redact_tree(item, secret) for item in value]
-    if isinstance(value, tuple):
-        return tuple(_redact_tree(item, secret) for item in value)
-    return value
 
 
 def _profile_name() -> str:

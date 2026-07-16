@@ -11,6 +11,7 @@ The tests use only an ephemeral loopback HTTP server and temporary HERMES_HOME.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 import shutil
@@ -18,9 +19,12 @@ import sqlite3
 import subprocess
 import sys
 import threading
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -103,6 +107,7 @@ def _start_local_model_server(
                     "method": self.command,
                     "path": self.path,
                     "peer": self.client_address[0],
+                    "authorization": self.headers.get("Authorization"),
                     "body": body,
                 }
             )
@@ -183,7 +188,20 @@ def test_real_hermes_discovers_and_registers_the_plugin(
     loaded = manager._plugins["auxiliary-brain"]
     assert loaded.enabled is True
     assert loaded.error is None
-    assert manager._plugin_commands == {}, "the plugin must not expose unsafe slash commands"
+    assert set(manager._plugin_commands) == {"brain"}
+    handler = manager._plugin_commands["brain"]["handler"]
+    disabled_reply = asyncio.run(handler("help"))
+    assert "disabled for this profile" in disabled_reply.lower()
+    assert (
+        _run_loaded_cli(
+            manager,
+            ["gateway", "enable", "--acknowledge-busy-risk"],
+        )
+        == 0
+    )
+    assert "/brain status" in asyncio.run(handler("help"))
+    assert _run_loaded_cli(manager, ["gateway", "disable"]) == 0
+    assert "disabled for this profile" in asyncio.run(handler("help")).lower()
     assert "brain" in manager._cli_commands
     assert set(manager._aux_tasks) == {"auxiliary_brain_reflex"}
     assert manager.has_hook("pre_llm_call")
@@ -193,6 +211,150 @@ def test_real_hermes_discovers_and_registers_the_plugin(
     server_args = parser.parse_args(["server", "start"])
     assert server_args.brain_command == "server"
     assert server_args.server_command == "start"
+
+
+@pytest.mark.skipif(
+    not HAS_HERMES_CHECKOUT,
+    reason="set HERMES_AGENT_ROOT to run against a Hermes Agent checkout",
+)
+def test_runtime_uses_active_hermes_profile_secret_scope(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, _, _ = _load_real_plugin(
+        tmp_path,
+        monkeypatch,
+        config_yaml="plugins:\n  enabled:\n    - auxiliary-brain\n",
+    )
+    runtime = manager._plugins["auxiliary-brain"].module.register.__globals__["RUNTIME"]
+    runtime_error = manager._plugins["auxiliary-brain"].module.register.__globals__[
+        "BrainRuntimeError"
+    ]
+    monkeypatch.setenv("AUXILIARY_BRAIN_API_KEY", "default-profile-secret")
+
+    from agent.secret_scope import (
+        is_multiplex_active,
+        reset_secret_scope,
+        set_multiplex_active,
+        set_secret_scope,
+    )
+
+    previous_multiplex = is_multiplex_active()
+    set_multiplex_active(True)
+    try:
+        token = set_secret_scope({"AUXILIARY_BRAIN_API_KEY": "secondary-profile-secret"})
+        try:
+            assert runtime.config().api_key == "secondary-profile-secret"
+            handler = manager._plugin_commands["brain"]["handler"]
+            reply = asyncio.run(handler("help"))
+            assert "unavailable in a multiplex-profile gateway" in reply
+        finally:
+            reset_secret_scope(token)
+
+        with pytest.raises(runtime_error, match="active profile"):
+            runtime.config()
+    finally:
+        set_multiplex_active(previous_multiplex)
+
+
+@pytest.mark.skipif(
+    not HAS_HERMES_CHECKOUT,
+    reason="set HERMES_AGENT_ROOT to run against a Hermes Agent checkout",
+)
+def test_real_idle_gateway_dispatches_brain_without_starting_cloud_agent(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager, _, hermes_plugins = _load_real_plugin(
+        tmp_path,
+        monkeypatch,
+        config_yaml="""plugins:
+  enabled:
+    - auxiliary-brain
+  entries:
+    auxiliary-brain:
+      config:
+        gateway_slash_enabled: true
+""",
+    )
+    monkeypatch.setattr(hermes_plugins, "_plugin_manager", manager)
+
+    import gateway.run as gateway_run
+    from gateway.config import GatewayConfig, Platform, PlatformConfig
+    from gateway.platforms.base import MessageEvent
+    from gateway.run import GatewayRunner
+    from gateway.session import SessionEntry, SessionSource, build_session_key
+
+    source = SessionSource(
+        platform=Platform.TELEGRAM,
+        user_id="u1",
+        chat_id="c1",
+        user_name="tester",
+        chat_type="dm",
+    )
+    event = MessageEvent(text="/brain help", source=source, message_id="m1")
+    runner = object.__new__(GatewayRunner)
+    runner.config = GatewayConfig(
+        platforms={Platform.TELEGRAM: PlatformConfig(enabled=True, token="***")}
+    )
+    adapter = MagicMock()
+    adapter.send = AsyncMock()
+    runner.adapters = {Platform.TELEGRAM: adapter}
+    runner._voice_mode = {}
+    runner.hooks = SimpleNamespace(
+        emit=AsyncMock(),
+        emit_collect=AsyncMock(return_value=[]),
+        loaded_hooks=False,
+    )
+    session_entry = SessionEntry(
+        session_key=build_session_key(source),
+        session_id="sess-1",
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+        platform=Platform.TELEGRAM,
+        chat_type="dm",
+    )
+    runner.session_store = MagicMock()
+    runner.session_store.get_or_create_session.return_value = session_entry
+    runner.session_store.load_transcript.return_value = []
+    runner.session_store.has_any_sessions.return_value = True
+    runner.session_store.append_to_transcript = MagicMock()
+    runner.session_store.rewrite_transcript = MagicMock()
+    runner.session_store.update_session = MagicMock()
+    runner._running_agents = {}
+    runner._pending_messages = {}
+    runner._pending_approvals = {}
+    runner._session_db = None
+    runner._reasoning_config = None
+    runner._provider_routing = {}
+    runner._fallback_model = None
+    runner._show_reasoning = False
+    runner._is_user_authorized = lambda _source: True
+    runner._set_session_env = lambda _context: None
+    runner._should_send_voice_reply = lambda *_args, **_kwargs: False
+    runner._send_voice_reply = AsyncMock()
+    runner._capture_gateway_honcho_if_configured = lambda *_args, **_kwargs: None
+    runner._emit_gateway_run_progress = AsyncMock()
+    runner._run_agent = AsyncMock(side_effect=AssertionError("/brain leaked to cloud agent"))
+    monkeypatch.setattr(
+        gateway_run,
+        "_resolve_runtime_agent_kwargs",
+        lambda: {"api_key": "***"},
+    )
+
+    response = asyncio.run(runner._handle_message(event))
+
+    assert response is not None
+    assert "/brain status" in response
+    runner._run_agent.assert_not_called()
+
+    runner.config.platforms[Platform.TELEGRAM].extra.update(
+        {"allow_admin_from": ["owner"], "user_allowed_commands": []}
+    )
+    denied = asyncio.run(runner._handle_message(event))
+    assert denied is not None
+    assert "/brain is admin-only here" in denied
+    runner._run_agent.assert_not_called()
 
 
 @pytest.mark.skipif(
@@ -339,6 +501,91 @@ auxiliary:
     assert json.loads(prediction[1]) == completion
     assert prediction[2] == "tiny-e2e"
     assert prediction[3] == f"http://127.0.0.1:{port}/v1"
+
+
+@pytest.mark.skipif(
+    not HAS_HERMES_CHECKOUT,
+    reason="set HERMES_AGENT_ROOT to run against a Hermes Agent checkout",
+)
+def test_real_hermes_opt_in_brain_slash_uses_only_loopback_model(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cross the real plugin loader, slash handler, HTTP client, and store."""
+
+    endpoint_secret = "slash-endpoint-secret"
+    monkeypatch.setenv("AUXILIARY_BRAIN_API_KEY", endpoint_secret)
+    completion = {
+        "summary": f"Handled by the tiny loopback brain; malicious echo {endpoint_secret}",
+        "category": "note",
+        "entities": ["Hermes"],
+        "action_items": ["Keep it local"],
+        "fields": {"transport": "plugin slash"},
+        "confidence": 0.94,
+    }
+    server, server_thread, observed = _start_local_model_server(
+        models=["tiny-slash-e2e"],
+        completion=completion,
+    )
+    port = server.server_address[1]
+    config_yaml = f"""plugins:
+  enabled:
+    - auxiliary-brain
+  entries:
+    auxiliary-brain:
+      config:
+        mode: explicit
+        capture: true
+        auto_discover: false
+        gateway_slash_enabled: true
+auxiliary:
+  auxiliary_brain_reflex:
+    provider: custom
+    model: tiny-slash-e2e
+    base_url: http://127.0.0.1:{port}/v1
+    timeout: 3
+"""
+
+    try:
+        manager, hermes_home, _ = _load_real_plugin(
+            tmp_path,
+            monkeypatch,
+            config_yaml=config_yaml,
+        )
+        assert set(manager._plugin_commands) == {"brain"}
+        handler = manager._plugin_commands["brain"]["handler"]
+        response = asyncio.run(handler("extract Keep this entirely on loopback"))
+    finally:
+        _stop_local_model_server(server, server_thread)
+
+    assert "Handled by the tiny loopback brain" in response
+    assert endpoint_secret not in response
+    assert "[redacted]" in response
+    assert "prediction_id" not in response
+    assert "127.0.0.1" not in response
+    assert [(item["method"], item["path"]) for item in observed] == [
+        ("GET", "/v1/models"),
+        ("POST", "/v1/chat/completions"),
+    ]
+    assert {item["peer"] for item in observed} == {"127.0.0.1"}
+    assert {item["authorization"] for item in observed} == {f"Bearer {endpoint_secret}"}
+    assert observed[1]["body"]["model"] == "tiny-slash-e2e"
+    assert "Keep this entirely on loopback" in observed[1]["body"]["messages"][-1]["content"]
+
+    database = hermes_home / "auxiliary-brain" / "brain.db"
+    with sqlite3.connect(database) as connection:
+        event = connection.execute(
+            "SELECT input_text, task_key, metadata_json FROM events"
+        ).fetchone()
+        prediction = connection.execute(
+            "SELECT output_json, raw_output, model FROM predictions"
+        ).fetchone()
+    assert event is not None
+    assert event[0] == "Keep this entirely on loopback"
+    assert event[1] == "generic_extract"
+    assert json.loads(event[2])["source"] == "gateway-slash"
+    assert prediction is not None
+    assert endpoint_secret not in " ".join(str(value) for value in prediction)
 
 
 @pytest.mark.skipif(

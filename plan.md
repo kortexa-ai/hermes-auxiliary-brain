@@ -25,6 +25,11 @@ without changing the plugin.
 - Explicit `hermes brain` commands are the reliable local fast path. A transparent
   natural-language turn router is intentionally deferred because Hermes does
   not currently expose a generic plugin turn-routing contract.
+- The messaging `/brain` surface is a narrow, single-profile opt-in. Current
+  Hermes versions dispatch it correctly while idle but can misroute it during
+  an active turn, so enablement requires an explicit risk acknowledgement and
+  the documented rule is to invoke it only between turns. Multiplex gateways
+  fail closed until Hermes gives plugin handlers a reliable event-profile scope.
 - Shadow/enrichment hooks are opt-in and fail open: if the local model is down,
   normal Hermes operation continues unchanged.
 - Keep the system prompt byte-stable. Any optional enrichment is injected into
@@ -79,8 +84,8 @@ without changing the plugin.
   - Added `hermes brain setup|doctor|status|tasks|mode|run|correct|export|evaluate`.
   - Registered a plugin-defined auxiliary task for model-picker/config integration.
   - Added an optional synchronous shadow/assist hook, disabled in explicit mode.
-  - Deliberately withheld `/brain` until Hermes has an authenticated, busy-safe
-    dynamic plugin command path; no private host monkey-patching was added.
+  - Deliberately withheld `/brain` from v0.1 while its gateway safety contract
+    was investigated; no private host monkey-patching was added.
 
 - [x] **5. Make installation and configuration boring**
   - Added a cross-platform, standard-library-only installer.
@@ -163,30 +168,42 @@ without changing the plugin.
     dashboard API/entry artifacts.
   - [x] Tag and publish `v0.3.0` with release notes.
 
-- [ ] **12. Support remote gateway check-ins safely (`v0.4.0`)** - host dependency
-  - Hermes already dispatches plugin slash commands while a session is idle.
-    Its running-agent fast path currently resolves built-in commands only, so
-    an unknown dynamic `/brain` command may be treated as conversational
-    follow-up text and reach the main model.
-  - Propose the smallest generic Hermes change: make active-session bypass
-    plugin-aware, then reject dynamic plugin commands with the standard
-    "wait or /stop" response while a turn is busy. Concurrent plugin-command
-    execution can remain a separate future contract. Preserve platform command
-    authorization and never inject the command as a user turn.
-  - Upstream already tracks this exact generic contract in
-    [issue #58559](https://github.com/NousResearch/hermes-agent/issues/58559).
-    [Draft PR #58591](https://github.com/NousResearch/hermes-agent/pull/58591)
-    covers plugin and skill detection at both active-session layers, applies
-    slash access control, and prevents dynamic commands becoming pending agent
-    text. Do not create a competing Kortexa patch while that work is active.
-  - After that contract exists, register a narrow gateway `/brain` surface for
-    `help`, sanitized `status`, and bounded task/check-in execution. Keep
-    setup, endpoint changes, server start/stop, export, evaluation, and training
-    local-admin-only.
-  - Test idle, starting, busy-interrupt, busy-queue, busy-steer, and concurrent
-    sessions through a real gateway adapter before advertising remote use.
-  - Fail closed on older Hermes versions: withhold `/brain` rather than expose
-    a command that can silently become cloud-bound text.
+- [ ] **12. Add opt-in remote gateway check-ins (`v0.4.0`)** - release validation in progress
+  - Register one process-wide `/brain` handler, then require the active single
+    profile to enable its idle-path capability with
+    `hermes brain gateway enable --acknowledge-busy-risk`. Keep capability off
+    by default and read `gateway status|enable|disable` on every invocation, so
+    setting changes need no gateway restart after the plugin itself is loaded.
+  - Limit the messaging surface to `/brain help`, sanitized `/brain status`,
+    and four fixed local tasks: `checkin`, `followup`, `note`, and `extract`.
+    Cap task input at 8,000 characters, treat blank `/brain` as help, and reject
+    missing task text or unknown requests.
+  - Do not expose setup, endpoint/model selection, server lifecycle, mode,
+    corrections, export, evaluation, arbitrary task names, or training through
+    the gateway. Return sanitized failures without credentials, endpoints,
+    tracebacks, or raw server responses.
+  - Document the current contract honestly: plugin commands dispatch correctly
+    while the gateway is idle, but an invocation received during an active turn
+    can still be treated as cloud-bound follow-up text before the plugin runs.
+    Users must invoke `/brain` only between turns; queue, steer, and interrupt
+    settings do not remove the risk.
+  - Upstream tracks the generic busy-session fix in
+    [issue #58559](https://github.com/NousResearch/hermes-agent/issues/58559) and
+    [draft PR #58591](https://github.com/NousResearch/hermes-agent/pull/58591).
+    Keep the opt-in acknowledgement until the released Hermes host provides
+    and the plugin verifies that busy-safe contract; do not carry a private
+    host monkey patch.
+  - Reject `/brain` on multiplex-profile gateways until Hermes scopes every
+    process-global plugin-command invocation to the routed event's profile.
+    Resolve endpoint credentials through Hermes' active profile secret scope,
+    and fail closed rather than falling back to another profile's environment.
+  - [x] Pass the complete local suite against the adjacent Hermes checkout,
+    including real idle gateway dispatch and a
+    plugin-loader-to-loopback-model-to-SQLite slash-command E2E. Ruff,
+    formatting, compilation, and diff checks pass; an isolated installed
+    profile proves default-off, acknowledgement, registration, and disable.
+  - [ ] Push `main`, pass the remote Python 3.11/3.12/3.13 matrix, then tag and
+    publish `v0.4.0` with release notes.
 
 - [x] **13. Define programmatic access without publishing the local model** - design complete
   - Hermes already has an authenticated OpenAI-compatible `api_server` gateway
@@ -198,13 +215,13 @@ without changing the plugin.
     surface when `hermes dashboard` or `hermes serve` is running.
   - The same `hermes serve` backend already exposes authenticated JSON-RPC over
     WebSocket. `cli.exec` can run non-interactive `brain` CLI commands today;
-    `command.dispatch` can invoke plugin slash handlers after `/brain` is
-    safely registered. Treat these as host APIs, not reasons to invent a
-    second daemon in this plugin.
+    `command.dispatch` can invoke the opt-in plugin slash handler while the
+    host is idle. Treat these as host APIs, not reasons to invent a second
+    daemon in this plugin.
   - The authenticated status/check-in dashboard routes in step 11 ship in
     `v0.3.0` and need no Hermes core change. Document clearly that they are
     unavailable when only the messaging gateway is running.
-  - Apart from the deliberately narrow `POST /checkin` candidate, defer
+  - Apart from the deliberately narrow shipped `POST /checkin` route, defer
     mutating/headless endpoints such as generic `POST /run`, `POST /correct`,
     or service bearer-token access until the contract includes strict body
     caps, fixed task names, no endpoint/model override, idempotency, rate
@@ -235,9 +252,12 @@ without changing the plugin.
     human promotion, rollback, and artifact provenance. Never train or promote
     merely because enough time or examples elapsed.
   - Add `hermes brain train status` and `hermes brain train prepare` here, not
-    in `v0.3.0`. `status` reports training readiness without changing weights;
-    `prepare` lints reviewed examples and creates the deterministic TRL
-    train/holdout bundle plus reproducibility manifest used by the trainer.
+    in `v0.3.0` or `v0.4.0`. `status` reports training readiness without
+    changing weights; `prepare` lints reviewed examples and creates the
+    deterministic TRL train/holdout bundle plus reproducibility manifest used
+    by the trainer.
+    Its privacy lint must flag unattributed `gateway-slash` rows for explicit
+    review before they enter either split.
   - Support local GPU, Apple Silicon where the selected trainer supports it,
     and an explicit user-selected remote GPU runner later. CPU-only training
     may be allowed for experiments but must not be marketed as the happy path.
@@ -257,8 +277,8 @@ without changing the plugin.
 | Explicit `hermes brain help` | Tiny | `v0.3.0` | Argparse help already exists; this improves discovery. |
 | Managed server log tail | Small | `v0.3.0` | State/log ownership already exists in `v0.2.0`. |
 | Authenticated dashboard status and fixed check-in API | Small-medium | `v0.3.0` | Supported plugin surface; reuse host auth, enforce caps, and prove packaging E2E. |
-| Direct task/correction service API | Medium | `v0.4.0` or later | Needs a durable auth, idempotency, and abuse-boundary contract. |
-| Busy-safe messaging `/brain` | Small core fix, cross-repo risk | `v0.4.0` | Upstream #58591 must land before the plugin exposes the command. |
+| Direct task/correction service API | Medium | Future | Needs a durable auth, idempotency, and abuse-boundary contract. |
+| Opt-in messaging `/brain` | Small plugin change, documented host risk | `v0.4.0` | Useful while idle; default-off acknowledgement preserves an honest boundary until upstream #58591 lands. |
 | Training readiness and deterministic bundle | Medium | `v0.5.0` | Ship with the trainer contract instead of freezing a premature bundle format. |
 | LoRA train/convert/evaluate/promote/rollback | Large | `v0.5.0` | Separate ML environment, hardware, reproducibility, and rollback work. |
 
@@ -339,3 +359,13 @@ without changing the plugin.
   with the dashboard router tests enabled. A fresh native Git installation
   loaded version 0.3.0 and contained the manifest, authenticated API module,
   and dashboard entry bundle. The release raccoon has been issued a helmet.
+- 2026-07-16: Implemented the v0.4.0 default-off gateway surface with explicit
+  busy-risk acknowledgement, local status/disable controls, live config gating,
+  fixed bounded tasks, and sanitized replies. The upstream busy-session fix
+  remains draft, so `/brain` is documented for between-turn use only. Training
+  status, bundle preparation, and the adapter pipeline remain v0.5.0 work.
+- 2026-07-16: Hardened gateway replies against endpoint-secret echo and
+  oversized unknown actions, added profile-scoped secret resolution and
+  multiplex fail-closed behavior, then passed the complete local suite plus a
+  fresh-profile install/enable/register/disable smoke test. Remote CI and
+  release tagging are the remaining v0.4.0 steps.

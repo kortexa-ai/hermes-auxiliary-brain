@@ -285,6 +285,23 @@ def redact_secret(value: str, secret: str | None) -> str:
     return value.replace(secret, "[redacted]") if secret else value
 
 
+def redact_tree(value: Any, secret: str | None) -> Any:
+    """Remove an endpoint credential from nested JSON-compatible data."""
+
+    if isinstance(value, str):
+        return redact_secret(value, secret)
+    if isinstance(value, dict):
+        return {
+            redact_secret(key, secret) if isinstance(key, str) else key: redact_tree(item, secret)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [redact_tree(item, secret) for item in value]
+    if isinstance(value, tuple):
+        return tuple(redact_tree(item, secret) for item in value)
+    return value
+
+
 class _NoRedirectHandler(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
         return None

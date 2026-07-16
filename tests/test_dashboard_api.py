@@ -124,6 +124,35 @@ def test_checkin_runs_only_the_fixed_task_and_returns_sanitized_result(
     }
 
 
+def test_checkin_redacts_endpoint_secret_from_entire_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api, client = _client()
+    secret = "dashboard-endpoint-secret"
+    monkeypatch.setenv("AUXILIARY_BRAIN_API_KEY", secret)
+
+    class EchoRuntime:
+        def run(self, *_args: Any, **_kwargs: Any) -> SimpleNamespace:
+            return SimpleNamespace(
+                output={secret: f"echo: {secret}"},
+                model=secret,
+                latency_ms=3.5,
+                prediction_id="pred_42",
+            )
+
+    monkeypatch.setattr(api, "RUNTIME", EchoRuntime())
+
+    response = client.post(
+        "/api/plugins/auxiliary-brain/checkin",
+        json={"text": "Completed a practice session."},
+    )
+
+    rendered = response.text
+    assert response.status_code == 200
+    assert secret not in rendered
+    assert "[redacted]" in rendered
+
+
 @pytest.mark.parametrize(
     "payload",
     [

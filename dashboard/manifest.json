@@ -3,7 +3,7 @@
   "label": "Auxiliary Brain",
   "description": "Authenticated status and bounded check-in API for the local auxiliary brain.",
   "icon": "Brain",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "tab": {
     "path": "/auxiliary-brain",
     "hidden": true
