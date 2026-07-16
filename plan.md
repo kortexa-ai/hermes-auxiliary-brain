@@ -158,6 +158,10 @@ without changing the plugin.
     and a fixed-purpose `POST /checkin` route. Reuse the same report/runtime
     code, cap inputs, and allow no endpoint/model override. No unauthenticated
     route and no remote server/process control.
+  - [x] Pass the Python 3.11/3.12/3.13 CI matrix and Ruff, then install from the
+    public Git repository into an isolated profile and verify the CLI plus all
+    dashboard API/entry artifacts.
+  - [x] Tag and publish `v0.3.0` with release notes.
 
 - [ ] **12. Support remote gateway check-ins safely (`v0.4.0`)** - host dependency
   - Hermes already dispatches plugin slash commands while a session is idle.
@@ -331,3 +335,7 @@ without changing the plugin.
   an isolated install loads `brain help` plus `status --json`. Training
   readiness and bundle preparation remain deliberately grouped with the full
   v0.5.0 training pipeline.
+- 2026-07-16: The v0.3.0 remote matrix passed on Python 3.11, 3.12, and 3.13
+  with the dashboard router tests enabled. A fresh native Git installation
+  loaded version 0.3.0 and contained the manifest, authenticated API module,
+  and dashboard entry bundle. The release raccoon has been issued a helmet.
