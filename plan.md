@@ -116,15 +116,144 @@ without changing the plugin.
   - GitHub Actions passed tests on Python 3.11, 3.12, and 3.13 plus Ruff lint
     and format checks.
 
-- [ ] **10. Ship the one-command local server** - in progress
-  - Add `hermes brain server start|status|stop`.
-  - Default to `LiquidAI/LFM2.5-230M-GGUF:Q4_K_M` on `127.0.0.1:8080`.
-  - Reuse an installed `llama`/`llama-server`, otherwise download a pinned,
-    checksum-verified llama.cpp CPU release into the active Hermes profile.
-  - Let llama.cpp download and cache the GGUF through its official `-hf` path.
-  - Keep PID metadata and logs profile-local; refuse unsafe stop operations.
-  - Configure the auxiliary-brain endpoint after the server becomes ready.
-  - Release as plugin `v0.2.0` with SemVer tags and GitHub release notes.
+- [ ] **10. Ship the one-command local server (`v0.2.0`)** - in progress
+  - [x] Implement a profile-local llama.cpp manager for Windows, macOS, and
+    Ubuntu Linux on x64 and arm64.
+  - [x] Pin llama.cpp `b10046`; verify the selected release asset's size and
+    SHA-256 before safe extraction.
+  - [x] Default to `LiquidAI/LFM2.5-230M-GGUF:Q4_K_M` on `127.0.0.1:8080`.
+  - [x] Reuse an installed `llama`/`llama-server`, otherwise install the CPU
+    runtime under the active Hermes profile.
+  - [x] Keep the Hugging Face model cache, PID metadata, and logs profile-local;
+    verify process identity before stop and reject non-loopback binds.
+  - [x] Exercise the real pinned Windows asset and a real LFM download,
+    start, health check, and stop lifecycle.
+  - [ ] Wire `hermes brain server start|status|logs|stop` into the plugin CLI.
+  - [ ] Configure the auxiliary-brain endpoint only after the server is ready
+    and reports the requested model.
+  - [ ] Finish operator documentation, the complete test pass, and an isolated
+    install-from-GitHub smoke test.
+  - [ ] Tag and publish `v0.1.0`, then tag and publish `v0.2.0` with release notes.
+
+- [ ] **11. Make operation and diagnosis obvious (`v0.3.0`)** - planned
+  - Keep `status` as the quick read-only snapshot. Expand it to show the plugin
+    version, active profile, effective configuration, configured endpoint and
+    model, managed-versus-external server ownership, PID/binary/build/port,
+    live health and model identity, auth presence without secrets, storage
+    location, and record counts.
+  - Keep `doctor` as the deeper live check. Report named `PASS`, `WARN`, and
+    `FAIL` checks with concrete fixes and a non-zero exit code for failures.
+    Include config parsing, loopback policy, endpoint reachability, exact model
+    match, managed PID/image/port state, binary/cache/log paths, and writable
+    data storage.
+  - Add `--json` to `status` and `doctor`, generated from the same report model
+    as human output so scripts and future APIs do not scrape terminal prose.
+  - Add `hermes brain help` as an explicit alias for the existing
+    `hermes brain --help`, with a few copy-paste examples and no model call.
+  - Add `hermes brain server logs [--lines N]`; status and doctor should point
+    to it when startup fails.
+  - Candidate training-preparation slice: add `hermes brain train status` and
+    `train prepare`. They may lint corrected examples and create a deterministic
+    TRL `messages` train/holdout bundle plus a reproducibility manifest, but
+    must not install an ML stack, change weights, upload data, or promote a
+    model in v0.3.0.
+  - Do not add a second mutable `config` command merely to print settings.
+    `status` owns inspection; `setup` and `mode` remain the mutation paths.
+  - Candidate if it stays small: expose authenticated, bounded dashboard-plugin
+    routes for JSON `status`, `doctor`, and `tasks`, plus one fixed-purpose
+    `POST /checkin` route. Reuse the same report/runtime code, cap inputs, and
+    allow no endpoint/model override. No unauthenticated route and no remote
+    server/process control.
+
+- [ ] **12. Support remote gateway check-ins safely** - host dependency;
+  target `v0.4.0`, or fold into `v0.3.0` only if the host fix lands first
+  - Hermes already dispatches plugin slash commands while a session is idle.
+    Its running-agent fast path currently resolves built-in commands only, so
+    an unknown dynamic `/brain` command may be treated as conversational
+    follow-up text and reach the main model.
+  - Propose the smallest generic Hermes change: make active-session bypass
+    plugin-aware, then reject dynamic plugin commands with the standard
+    "wait or /stop" response while a turn is busy. Concurrent plugin-command
+    execution can remain a separate future contract. Preserve platform command
+    authorization and never inject the command as a user turn.
+  - After that contract exists, register a narrow gateway `/brain` surface for
+    `help`, sanitized `status`, and bounded task/check-in execution. Keep
+    setup, endpoint changes, server start/stop, export, evaluation, and training
+    local-admin-only.
+  - Test idle, starting, busy-interrupt, busy-queue, busy-steer, and concurrent
+    sessions through a real gateway adapter before advertising remote use.
+  - Fail closed on older Hermes versions: withhold `/brain` rather than expose
+    a command that can silently become cloud-bound text.
+
+- [ ] **13. Define programmatic access without publishing the local model** - design split
+  - Hermes already has an authenticated OpenAI-compatible `api_server` gateway
+    for normal agent turns. Enabled plugins participate in those turns through
+    their registered hooks and tools, but this is not a direct auxiliary-brain
+    task API and normally still invokes the main model.
+  - Hermes also supports authenticated dashboard-plugin backend routes under
+    `/api/plugins/<name>/...`; this is the preferred direct JSON extension
+    surface when `hermes dashboard` or `hermes serve` is running.
+  - The same `hermes serve` backend already exposes authenticated JSON-RPC over
+    WebSocket. `cli.exec` can run non-interactive `brain` CLI commands today;
+    `command.dispatch` can invoke plugin slash handlers after `/brain` is
+    safely registered. Treat these as host APIs, not reasons to invent a
+    second daemon in this plugin.
+  - The read-only dashboard routes in step 11 are low-to-medium effort and need
+    no Hermes core change. Document clearly that they are unavailable when only
+    the messaging gateway is running.
+  - Apart from the deliberately narrow `POST /checkin` candidate, defer
+    mutating/headless endpoints such as generic `POST /run`, `POST /correct`,
+    or service bearer-token access until the contract includes strict body
+    caps, fixed task names, no endpoint/model override, idempotency, rate
+    limits, audit-safe errors, and an explicit authentication story.
+  - Never expose llama.cpp directly to the internet. Remote clients talk to an
+    authenticated Hermes surface; Hermes talks to the loopback model.
+
+- [ ] **14. Add an explicit training and promotion pipeline (`v0.5.0`)** - larger workstream
+  - The current correction/export/evaluate loop is the data foundation, but
+    the managed llama.cpp server is an inference runtime, not a trainer.
+    Do not productize llama.cpp's own finetune example: upstream describes it
+    as FP32-only on limited hardware and "very much WIP" in the
+    [training README](https://github.com/ggml-org/llama.cpp/blob/b10046/examples/training/README.md).
+  - Train from LiquidAI's native Hugging Face checkpoint with a separate,
+    isolated Python environment. Start with supervised LoRA fine-tuning through
+    a supported TRL or Unsloth path; do not update GGUF weights in place.
+  - Upgrade the audit export into a training bundle whose rows contain the
+    exact task system/user messages and corrected JSON assistant response.
+    Permanently group normalized duplicate inputs into one side of a
+    deterministic train/holdout split so evaluation cannot reuse training text.
+  - Add dataset lint and minimum-example gates, task-contract pinning, privacy
+    review, a reproducible training manifest, seed/dependency/model revisions,
+    and resumable artifact metadata.
+  - Convert the reviewed PEFT adapter to a llama.cpp-compatible GGUF LoRA (or
+    merge and quantize only when required), then let the managed server load the
+    candidate adapter alongside the unchanged base GGUF.
+  - Require baseline-versus-candidate evaluation, per-task thresholds, explicit
+    human promotion, rollback, and artifact provenance. Never train or promote
+    merely because enough time or examples elapsed.
+  - Support local GPU, Apple Silicon where the selected trainer supports it,
+    and an explicit user-selected remote GPU runner later. CPU-only training
+    may be allowed for experiments but must not be marketed as the happy path.
+  - First implementation gate: prove one tiny native-checkpoint LoRA can train,
+    convert, load, and answer through the pinned managed server before building
+    the general orchestration UI. Relevant upstream contracts are LiquidAI's
+    [LFM2.5-230M model card](https://huggingface.co/LiquidAI/LFM2.5-230M),
+    [TRL guide](https://docs.liquid.ai/lfm/fine-tuning/trl), llama.cpp's
+    [PEFT adapter converter](https://github.com/ggml-org/llama.cpp/blob/b10046/convert_lora_to_gguf.py),
+    and its [`--lora` server support](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md).
+
+## Release sizing after v0.2.0
+
+| Capability | Size | Target | Reason |
+| --- | --- | --- | --- |
+| Rich `status`, actionable `doctor`, `--json` | Small | `v0.3.0` | Extends existing code and unlocks scripts/API reuse. |
+| Explicit `hermes brain help` | Tiny | `v0.3.0` | Argparse help already exists; this improves discovery. |
+| Managed server log tail | Small | `v0.3.0` | State/log ownership already exists in `v0.2.0`. |
+| Authenticated dashboard status and fixed check-in API | Small-medium | `v0.3.0` candidate | Supported plugin surface; auth, caps, and packaging need E2E proof. |
+| Direct task/correction service API | Medium | `v0.4.0` or later | Needs a durable auth, idempotency, and abuse-boundary contract. |
+| Busy-safe messaging `/brain` | Small core fix, cross-repo risk | `v0.4.0`, possibly `v0.3.0` | Plugin code is easy; the generic Hermes busy-path contract must land first. |
+| Training readiness and deterministic bundle | Medium | `v0.3.0` candidate | Useful without ML dependencies; establishes the later trainer contract. |
+| LoRA train/convert/evaluate/promote | Large | `v0.5.0` | Separate ML environment, hardware, reproducibility, and rollback work. |
 
 ## Acceptance criteria for v0.1.0
 
@@ -141,13 +270,11 @@ without changing the plugin.
 ## Deferred ideas
 
 - A generic Hermes plugin turn-router contract for transparent fast-path turns.
-- An authenticated, busy-safe dynamic plugin slash-command path, followed by
-  read/run-only `/brain` commands. Setup, mode, export, and evaluation stay CLI-only.
-- Training orchestration and adapter registry; v0.1 only produces curated data
-  and evaluation artifacts.
 - Extra task packs contributed as data rather than new core code.
 - Optional local embeddings or semantic retrieval after the basic classifier
   and extraction loop proves useful.
+- Automatic adapter selection per task; first prove one reviewed adapter can be
+  trained, evaluated, promoted, and rolled back safely.
 
 ## Progress log
 
@@ -179,3 +306,10 @@ without changing the plugin.
   installer and confirmed the remote CI matrix is green. The tiny goblin ships.
 - 2026-07-16: Started v0.2.0 work on a pinned, one-command llama.cpp + default
   LFM server lifecycle, plus a reproducible plugin version/tag story.
+- 2026-07-16: Completed the cross-platform llama.cpp manager and 38 focused
+  safety tests; a real pinned Windows binary and real LFM start/stop lifecycle
+  passed. CLI wiring and release work remain for v0.2.0.
+- 2026-07-16: Triaged diagnostics/help, remote gateway use, direct APIs, and
+  training. Scoped the low-risk operator work to v0.3.0, recorded the Hermes
+  busy-plugin-command dependency, and separated training into an explicit
+  evaluate/promote/rollback workstream.
