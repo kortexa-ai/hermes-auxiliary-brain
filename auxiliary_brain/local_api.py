@@ -264,6 +264,7 @@ def _request_json(
             raw = response.read()
     except HTTPError as exc:
         detail = exc.read(2_048).decode("utf-8", errors="replace").strip()
+        detail = redact_secret(detail, api_key)
         suffix = f": {detail}" if detail else ""
         raise LocalAPIError(f"local server returned HTTP {exc.code}{suffix}") from exc
     except (URLError, TimeoutError, OSError) as exc:
@@ -276,6 +277,12 @@ def _request_json(
     if not isinstance(value, dict):
         raise LocalAPIError("local server returned a non-object JSON response")
     return value
+
+
+def redact_secret(value: str, secret: str | None) -> str:
+    """Remove an endpoint credential from server-controlled diagnostics."""
+
+    return value.replace(secret, "[redacted]") if secret else value
 
 
 class _NoRedirectHandler(HTTPRedirectHandler):

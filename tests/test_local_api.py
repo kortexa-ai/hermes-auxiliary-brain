@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
+from io import BytesIO
 from typing import Any
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 
 import pytest
 
@@ -107,6 +108,29 @@ def test_list_models_deduplicates_ids_and_sends_auth(monkeypatch: pytest.MonkeyP
         "authorization": "Bearer secret",
         "timeout": 0.25,
     }
+
+
+def test_http_error_redacts_echoed_endpoint_credential(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "endpoint-secret-that-must-not-escape"
+
+    def rejected(request: Any, *, timeout: float) -> FakeResponse:
+        raise HTTPError(
+            request.full_url,
+            401,
+            "Unauthorized",
+            hdrs=None,
+            fp=BytesIO(f"rejected Bearer {secret}".encode()),
+        )
+
+    monkeypatch.setattr(local_api, "urlopen", rejected)
+
+    with pytest.raises(LocalAPIError) as caught:
+        list_models("http://localhost:1234", api_key=secret, timeout=0.25)
+
+    assert secret not in str(caught.value)
+    assert "Bearer [redacted]" in str(caught.value)
 
 
 def test_probe_endpoint_converts_transport_error_to_diagnostic(

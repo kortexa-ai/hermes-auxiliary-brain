@@ -81,7 +81,75 @@ def test_server_parser_exposes_managed_lifecycle() -> None:
     assert start.port == 8080
     assert start.wait_seconds == 600.0
     assert parser.parse_args(["server", "status"]).server_command == "status"
+    assert parser.parse_args(["server", "logs"]).server_command == "logs"
     assert parser.parse_args(["server", "stop"]).server_command == "stop"
+
+
+def test_explicit_help_prints_catalog_and_examples(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    parser = argparse.ArgumentParser()
+    plugin.setup_cli(parser)
+
+    assert plugin.brain_command(parser.parse_args(["help"])) == 0
+
+    output = capsys.readouterr().out
+    assert "server" in output
+    assert "status" in output
+    assert "examples:" in output
+    assert "hermes brain server start" in output
+
+
+def test_status_and_doctor_json_use_shared_reports(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class ReportRuntime:
+        def status(self) -> dict[str, Any]:
+            return {"schema_version": 1, "secret_safe": True}
+
+        def doctor(self) -> dict[str, Any]:
+            return {"schema_version": 1, "ok": False, "checks": []}
+
+    monkeypatch.setattr(plugin, "RUNTIME", ReportRuntime())
+    parser = argparse.ArgumentParser()
+    plugin.setup_cli(parser)
+
+    assert plugin.brain_command(parser.parse_args(["status", "--json"])) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "schema_version": 1,
+        "secret_safe": True,
+    }
+    assert plugin.brain_command(parser.parse_args(["doctor", "--json"])) == 1
+    assert json.loads(capsys.readouterr().out)["ok"] is False
+
+
+def test_doctor_human_output_prints_named_fixes(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class ReportRuntime:
+        def doctor(self) -> dict[str, Any]:
+            return {
+                "ok": False,
+                "checks": [
+                    {
+                        "name": "endpoint",
+                        "status": "FAIL",
+                        "message": "unavailable",
+                        "fix": "Start it.",
+                    }
+                ],
+            }
+
+    monkeypatch.setattr(plugin, "RUNTIME", ReportRuntime())
+    parser = argparse.ArgumentParser()
+    plugin.setup_cli(parser)
+
+    assert plugin.brain_command(parser.parse_args(["doctor"])) == 1
+    output = capsys.readouterr().out
+    assert "[FAIL] endpoint: unavailable" in output
+    assert "Fix: Start it." in output
 
 
 def test_server_start_waits_verifies_exact_model_then_configures(
@@ -212,6 +280,25 @@ def test_server_status_and_stop_use_managed_state(
     assert "state      : stopped" in capsys.readouterr().out
     assert plugin.brain_command(parser.parse_args(["server", "stop"])) == 0
     assert "state      : stopped" in capsys.readouterr().out
+
+
+def test_server_logs_prints_requested_bounded_tail(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    observed: list[int] = []
+
+    def fake_logs(*, lines: int) -> str:
+        observed.append(lines)
+        return "line two\nline three"
+
+    monkeypatch.setattr(plugin, "read_llama_server_logs", fake_logs)
+    parser = argparse.ArgumentParser()
+    plugin.setup_cli(parser)
+
+    assert plugin.brain_command(parser.parse_args(["server", "logs", "--lines", "2"])) == 0
+    assert observed == [2]
+    assert capsys.readouterr().out == "line two\nline three\n"
 
 
 def test_cli_mode_changes_behavior_without_inference(

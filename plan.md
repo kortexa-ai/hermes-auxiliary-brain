@@ -135,7 +135,7 @@ without changing the plugin.
     install-from-GitHub smoke test.
   - [x] Tag and publish `v0.1.0`, then tag and publish `v0.2.0` with release notes.
 
-- [ ] **11. Make operation and diagnosis obvious (`v0.3.0`)** - in progress
+- [x] **11. Make operation and diagnosis obvious (`v0.3.0`)**
   - Keep `status` as the quick read-only snapshot. Expand it to show the plugin
     version, active profile, effective configuration, configured endpoint and
     model, managed-versus-external server ownership, PID/binary/build/port,
@@ -184,7 +184,7 @@ without changing the plugin.
   - Fail closed on older Hermes versions: withhold `/brain` rather than expose
     a command that can silently become cloud-bound text.
 
-- [ ] **13. Define programmatic access without publishing the local model** - design split
+- [x] **13. Define programmatic access without publishing the local model** - design complete
   - Hermes already has an authenticated OpenAI-compatible `api_server` gateway
     for normal agent turns. Enabled plugins participate in those turns through
     their registered hooks and tools, but this is not a direct auxiliary-brain
@@ -324,3 +324,10 @@ without changing the plugin.
   pinned llama.cpp build when needed, waits for the default LFM model, verifies
   its identity, and only then saves configuration. All 155 tests passed, and a
   clean Hermes Git install exposed the full managed-server command tree.
+- 2026-07-16: Completed the v0.3.0 implementation: rich secret-safe status and
+  doctor reports, JSON output, explicit help, bounded server logs, and
+  host-authenticated status/check-in dashboard routes. All 186 tests pass; the
+  real-Hermes API test proves unauthenticated `401` and authenticated `200`, and
+  an isolated install loads `brain help` plus `status --json`. Training
+  readiness and bundle preparation remain deliberately grouped with the full
+  v0.5.0 training pipeline.

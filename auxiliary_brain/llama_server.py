@@ -48,6 +48,7 @@ INSTALL_DIRECTORY = "runtime"
 STATE_FORMAT_VERSION = 1
 MAX_ARCHIVE_BYTES = 256 * 1024 * 1024
 MAX_EXTRACTED_BYTES = 1024 * 1024 * 1024
+MAX_LOG_TAIL_BYTES = 1024 * 1024
 
 
 class LlamaServerError(RuntimeError):
@@ -574,6 +575,36 @@ def stop_llama_server(
             _stop_posix_process(status.pid, status.executable or "", timeout_seconds)
         state_path.unlink(missing_ok=True)
     return _empty_status(state_path, log_path)
+
+
+def read_llama_server_logs(
+    *,
+    hermes_home: str | Path | None = None,
+    lines: int = 100,
+) -> str:
+    """Return a bounded tail of the profile-local managed server log."""
+
+    if isinstance(lines, bool) or not isinstance(lines, int) or not 1 <= lines <= 10_000:
+        raise LlamaConfigurationError("lines must be an integer between 1 and 10000")
+    path = resolve_data_root(hermes_home) / LOG_FILENAME
+    if not path.is_file():
+        raise LlamaServerError(
+            f"managed server log does not exist yet: {path}; start the server first"
+        )
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            offset = max(0, size - MAX_LOG_TAIL_BYTES)
+            handle.seek(offset)
+            payload = handle.read(MAX_LOG_TAIL_BYTES)
+    except OSError as exc:
+        raise LlamaServerError(f"cannot read managed server log {path}: {exc}") from exc
+    text = payload.decode("utf-8", errors="replace")
+    selected = text.splitlines()[-lines:]
+    if offset:
+        selected.insert(0, f"[... log tail limited to {MAX_LOG_TAIL_BYTES} bytes ...]")
+    return "\n".join(selected)
 
 
 def _status_from_state(

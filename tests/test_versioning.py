@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import tomllib
 from pathlib import Path
@@ -20,6 +21,10 @@ def test_plugin_version_is_semver_and_matches_manifest() -> None:
         r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)",
         __version__,
     )
+    dashboard_manifest = json.loads(
+        (ROOT / "dashboard" / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert dashboard_manifest["version"] == __version__
 
 
 def test_python_package_reads_the_canonical_version_module() -> None:

@@ -17,7 +17,8 @@
    hermes gateway restart
    ```
 
-Try `hermes brain status`, then:
+Try `hermes brain status`, `hermes brain doctor`, or
+`hermes brain server logs --lines 100`, then:
 
 ```console
 hermes brain run progress_checkin "Completed a planned session."

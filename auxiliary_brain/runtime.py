@@ -22,7 +22,7 @@ from .local_api import (
     probe_endpoint,
 )
 from .store import BrainStore, PredictionRecord
-from .tasks import BASE_INSTRUCTION, TaskParseError, get_task, list_tasks
+from .tasks import BASE_INSTRUCTION, TaskParseError, get_task
 from .version import __version__
 
 PLUGIN_ID = "auxiliary-brain"
@@ -477,27 +477,14 @@ class BrainRuntime:
         }
 
     def status(self, *, refresh: bool = False) -> dict[str, Any]:
-        cfg = self.config()
-        endpoint: dict[str, Any]
-        try:
-            probe, model = self.probe(refresh=refresh)
-            endpoint = {
-                "reachable": True,
-                "base_url": probe.base_url,
-                "model": model,
-                "models": list(probe.models),
-                "latency_ms": probe.latency_ms,
-            }
-        except BrainRuntimeError as exc:
-            endpoint = {"reachable": False, "error": str(exc)}
-        return {
-            "mode": cfg.mode,
-            "capture": cfg.capture,
-            "endpoint": endpoint,
-            "data_root": str(self.data_root()),
-            "stats": self.store().stats(),
-            "tasks": [task.key for task in list_tasks()],
-        }
+        from .diagnostics import build_status_report
+
+        return build_status_report(self, refresh=refresh)
+
+    def doctor(self) -> dict[str, Any]:
+        from .diagnostics import build_doctor_report
+
+        return build_doctor_report(self)
 
     def store(self) -> BrainStore:
         path = self.data_root() / "brain.db"

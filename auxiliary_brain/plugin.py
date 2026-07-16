@@ -18,6 +18,7 @@ from .llama_server import (
     LlamaServerError,
     get_llama_server_status,
     install_llama_cpp,
+    read_llama_server_logs,
     start_llama_server,
     stop_llama_server,
 )
@@ -47,7 +48,7 @@ def register(ctx: Any) -> None:
         name="brain",
         help="Configure and use the local auxiliary brain",
         setup_fn=setup_cli,
-        handler_fn=brain_command,
+        handler_fn=_brain_cli_entry,
         description=(
             "Run bounded jobs on a local OpenAI-compatible model and manage "
             "reviewable learning examples."
@@ -56,7 +57,22 @@ def register(ctx: Any) -> None:
     ctx.register_hook("pre_llm_call", pre_llm_call)
 
 
+def _brain_cli_entry(args: argparse.Namespace) -> int:
+    """Preserve command failures across Hermes' return-value-blind CLI dispatch."""
+
+    exit_code = brain_command(args)
+    if exit_code:
+        raise SystemExit(exit_code)
+    return 0
+
+
 def setup_cli(parser: argparse.ArgumentParser) -> None:
+    parser.epilog = (
+        "examples:\n"
+        "  hermes brain server start\n"
+        "  hermes brain status --json\n"
+        '  hermes brain run progress_checkin "Finished a planned session."'
+    )
     sub = parser.add_subparsers(dest="brain_command")
 
     setup = sub.add_parser("setup", help="Discover or configure a local model server")
@@ -111,11 +127,16 @@ def setup_cli(parser: argparse.ArgumentParser) -> None:
         help="maximum startup/model-download wait (default: 600)",
     )
     server_sub.add_parser("status", help="show managed llama.cpp process state")
+    server_logs = server_sub.add_parser("logs", help="show the managed server log tail")
+    server_logs.add_argument("--lines", type=int, default=100)
     server_stop = server_sub.add_parser("stop", help="stop only the verified managed process")
     server_stop.add_argument("--timeout", type=float, default=5.0)
 
-    sub.add_parser("status", help="show mode, endpoint, tasks, and local data counts")
-    sub.add_parser("doctor", help="refresh endpoint checks and print fixes")
+    status = sub.add_parser("status", help="show effective config and live health")
+    status.add_argument("--json", action="store_true", help="emit machine-readable JSON")
+    doctor = sub.add_parser("doctor", help="run named checks and print concrete fixes")
+    doctor.add_argument("--json", action="store_true", help="emit machine-readable JSON")
+    sub.add_parser("help", help="show command help and copy-paste examples")
     sub.add_parser("tasks", help="list built-in local task contracts")
     mode = sub.add_parser("mode", help="change mode without contacting the local server")
     mode.add_argument("value", choices=sorted(VALID_MODES))
@@ -144,7 +165,7 @@ def setup_cli(parser: argparse.ArgumentParser) -> None:
     evaluate.add_argument("--task", choices=[task.key for task in list_tasks()])
     evaluate.add_argument("--limit", type=int, default=50)
 
-    parser.set_defaults(func=brain_command)
+    parser.set_defaults(func=brain_command, _brain_parser=parser)
 
 
 def brain_command(args: argparse.Namespace) -> int:
@@ -153,16 +174,23 @@ def brain_command(args: argparse.Namespace) -> int:
         if command == "setup":
             return _cmd_setup(args)
         if command == "status":
-            print(_format_status(RUNTIME.status()))
+            report = RUNTIME.status()
+            print(
+                json.dumps(report, indent=2, ensure_ascii=False, sort_keys=True)
+                if args.json
+                else _format_status(report)
+            )
             return 0
         if command == "doctor":
-            status = RUNTIME.status(refresh=True)
-            print(_format_status(status))
-            if not status["endpoint"].get("reachable"):
-                print("\nFix: start a local server, load a model, then run:")
-                print("  hermes brain setup --auto")
-                return 1
-            print("\nDoctor says: tiny brain awake. Surprisingly little screaming.")
+            report = RUNTIME.doctor()
+            print(
+                json.dumps(report, indent=2, ensure_ascii=False, sort_keys=True)
+                if args.json
+                else _format_doctor(report)
+            )
+            return 0 if report["ok"] else 1
+        if command == "help":
+            args._brain_parser.print_help()
             return 0
         if command == "server":
             return _cmd_server(args)
@@ -209,13 +237,13 @@ def brain_command(args: argparse.Namespace) -> int:
         print(f"Auxiliary brain: {exc}")
         return 1
 
-    parser = getattr(args, "_parser", None)
+    parser = getattr(args, "_brain_parser", None)
     if parser is not None:
         parser.print_help()
     else:
         print(
             "usage: hermes brain "
-            "{setup,server,status,doctor,tasks,mode,run,correct,export,evaluate}"
+            "{setup,server,status,doctor,help,tasks,mode,run,correct,export,evaluate}"
         )
     return 2
 
@@ -375,11 +403,14 @@ def _cmd_server(args: argparse.Namespace) -> int:
         status = get_llama_server_status()
         print(_format_server_status(status))
         return 0 if status.running and status.ready else 1
+    if action == "logs":
+        print(read_llama_server_logs(lines=args.lines))
+        return 0
     if action == "stop":
         status = stop_llama_server(timeout_seconds=args.timeout)
         print(_format_server_status(status))
         return 0
-    raise BrainRuntimeError("choose a server action: install, start, status, or stop")
+    raise BrainRuntimeError("choose a server action: install, start, status, logs, or stop")
 
 
 def _parse_json_object(value: str) -> dict[str, Any]:
@@ -416,29 +447,72 @@ def _format_result(result: Any) -> str:
 
 def _format_status(status: dict[str, Any]) -> str:
     endpoint = status["endpoint"]
+    config = status["config"]
+    server = status["server"]
+    storage = status["storage"]
+    profile = status["profile"]
+    plugin = status["plugin"]
     lines = [
-        "Hermes Auxiliary Brain",
-        f"  mode       : {status['mode']}",
-        f"  capture    : {'on' if status['capture'] else 'off'}",
-        f"  data       : {status['data_root']}",
+        f"Hermes Auxiliary Brain {plugin['version']}",
+        f"  profile    : {profile['name']} ({profile['home']})",
     ]
+    if config.get("valid"):
+        auth = config.get("auth") or {}
+        lines.extend(
+            [
+                f"  mode       : {config.get('mode')}",
+                f"  capture    : {'on' if config.get('capture') else 'off'}",
+                f"  configured : {config.get('base_url') or 'auto-discovery'}",
+                f"  model      : {config.get('model') or 'not selected'}",
+                f"  auth       : {'present (hidden)' if auth.get('configured') else 'keyless'}",
+            ]
+        )
+    else:
+        lines.extend(["  config     : invalid", f"  error      : {config.get('error')}"])
     if endpoint.get("reachable"):
         lines.extend(
             [
-                "  endpoint   : reachable",
-                f"  base URL   : {endpoint['base_url']}",
-                f"  model      : {endpoint['model']}",
+                "  live       : reachable",
+                f"  live model : {endpoint['model']}",
                 f"  probe      : {endpoint.get('latency_ms')}ms",
             ]
         )
     else:
-        lines.extend(["  endpoint   : unavailable", f"  error      : {endpoint.get('error')}"])
-    stats = status["stats"]
+        lines.extend(["  live       : unavailable", f"  live error : {endpoint.get('error')}"])
+    managed_state = (
+        "ready" if server.get("ready") else "running" if server.get("running") else "stopped"
+    )
+    lines.extend(
+        [
+            f"  ownership  : {server.get('configured_endpoint_ownership')}",
+            f"  managed    : {managed_state} (build {server.get('build')}, "
+            f"PID {server.get('pid') or '-'})",
+            f"  server URL : {server.get('base_url') or '-'}",
+            f"  binary     : {server.get('executable') or '-'}",
+            f"  server log : {server.get('log_path')}",
+            "  log command: hermes brain server logs --lines 100",
+            f"  data       : {storage.get('data_root')}",
+        ]
+    )
+    stats = storage.get("stats") or {}
     lines.append(
         "  records    : "
-        f"{stats['events']} events, {stats['predictions']} predictions, "
-        f"{stats['corrections']} corrections"
+        f"{stats.get('events', '?')} events, {stats.get('predictions', '?')} predictions, "
+        f"{stats.get('corrections', '?')} corrections"
     )
+    return "\n".join(lines)
+
+
+def _format_doctor(report: dict[str, Any]) -> str:
+    lines = ["Hermes Auxiliary Brain doctor"]
+    for check in report["checks"]:
+        lines.append(f"  [{check['status']}] {check['name']}: {check['message']}")
+        if check.get("fix") and check["status"] != "PASS":
+            lines.append(f"         Fix: {check['fix']}")
+    if report["ok"]:
+        lines.append("\nTiny brain is awake. The stethoscope heard only tasteful goblin noises.")
+    else:
+        lines.append("\nDoctor found one or more failures.")
     return "\n".join(lines)
 
 

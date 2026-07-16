@@ -18,6 +18,9 @@ def make_source(root: Path) -> Path:
     (package / "__pycache__").mkdir()
     (package / "__pycache__" / "runtime.pyc").write_bytes(b"not really bytecode")
     (root / "SKILL.md").write_text("# Skill\n", encoding="utf-8")
+    dashboard = root / "dashboard"
+    dashboard.mkdir()
+    (dashboard / "manifest.json").write_text('{"name":"auxiliary-brain"}\n')
     (root / "tests").mkdir()
     (root / "tests" / "should_not_copy.py").write_text("nope = True\n")
     return root
@@ -56,6 +59,7 @@ def test_copy_runtime_installs_only_runtime_paths(tmp_path) -> None:
     assert (destination / "plugin.yaml").is_file()
     assert (destination / "__init__.py").is_file()
     assert (destination / "auxiliary_brain" / "runtime.py").is_file()
+    assert (destination / "dashboard" / "manifest.json").is_file()
     assert not (destination / "auxiliary_brain" / "__pycache__").exists()
     assert not (destination / "tests").exists()
 

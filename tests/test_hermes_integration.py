@@ -15,6 +15,7 @@ import json
 import os
 import shutil
 import sqlite3
+import subprocess
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -157,7 +158,11 @@ def _run_loaded_cli(manager: Any, argv: list[str]) -> int:
     parser = argparse.ArgumentParser()
     entry["setup_fn"](parser)
     args = parser.parse_args(argv)
-    return entry["handler_fn"](args)
+    try:
+        result = entry["handler_fn"](args)
+    except SystemExit as exc:
+        return int(exc.code or 0)
+    return int(result or 0)
 
 
 @pytest.mark.skipif(
@@ -188,6 +193,52 @@ def test_real_hermes_discovers_and_registers_the_plugin(
     server_args = parser.parse_args(["server", "start"])
     assert server_args.brain_command == "server"
     assert server_args.server_command == "start"
+
+
+@pytest.mark.skipif(
+    not HAS_HERMES_CHECKOUT,
+    reason="set HERMES_AGENT_ROOT to run against a Hermes Agent checkout",
+)
+def test_real_hermes_cli_preserves_doctor_failure_exit_code(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, hermes_home, _ = _load_real_plugin(
+        tmp_path,
+        monkeypatch,
+        config_yaml="""plugins:
+  enabled:
+    - auxiliary-brain
+  entries:
+    auxiliary-brain:
+      config:
+        auto_discover: false
+auxiliary:
+  auxiliary_brain_reflex:
+    provider: custom
+    model: ''
+    base_url: ''
+    timeout: 8
+""",
+    )
+    env = os.environ.copy()
+    env["HERMES_HOME"] = str(hermes_home)
+    env["PYTHONPATH"] = os.pathsep.join([str(HERMES_AGENT_ROOT), env.get("PYTHONPATH", "")]).rstrip(
+        os.pathsep
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-m", "hermes_cli.main", "brain", "doctor", "--json"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert json.loads(result.stdout)["ok"] is False
 
 
 @pytest.mark.skipif(

@@ -24,6 +24,7 @@ RUNTIME_PATHS = (
     "plugin.yaml",
     "__init__.py",
     "auxiliary_brain",
+    "dashboard",
     "SKILL.md",
     "after-install.md",
 )

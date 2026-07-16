@@ -58,6 +58,7 @@ Useful lifecycle commands:
 
 ```console
 hermes brain server status
+hermes brain server logs --lines 100
 hermes brain server stop
 hermes brain server install --force
 ```
@@ -184,6 +185,7 @@ hermes brain run follow_up "Send the revised draft by Friday."
 hermes brain run research_note "Record this claim and what source should verify it."
 hermes brain run generic_extract "Pull the people, dates, claims, and open questions."
 hermes brain status
+hermes brain doctor
 ```
 
 Corrections accept a complete JSON object. `--file` avoids shell-quoting
@@ -198,14 +200,80 @@ Built-in runtime task keys are `progress_checkin`, `follow_up`,
 used by opt-in shadow/assist behavior. Each task has a strict JSON contract and
 treats its input as data, not instructions.
 
-Use `hermes brain --help` for the command catalog installed by your version.
+Use either `hermes brain --help` or `hermes brain help` for the command catalog
+and copy-paste examples installed by your version.
+
+### Status and diagnosis
+
+`status` is the quick snapshot. It shows the plugin/profile, effective
+configuration, configured and live model identity, managed-versus-external
+server ownership, PID/binary/build/log paths, credential presence without its
+value, storage path, and record counts:
+
+```console
+hermes brain status
+hermes brain status --json
+```
+
+`doctor` refreshes the live probe and runs named `PASS`, `WARN`, and `FAIL`
+checks. Failures include a concrete fix and produce a non-zero exit code. JSON
+uses the same report model as the human output:
+
+```console
+hermes brain doctor
+hermes brain doctor --json
+```
+
+### Authenticated status and check-in API
+
+When `hermes dashboard` or the headless `hermes serve` backend is running, the
+enabled plugin exposes two host-authenticated routes:
+
+```text
+GET  /api/plugins/auxiliary-brain/status
+POST /api/plugins/auxiliary-brain/checkin
+```
+
+They inherit Hermes' dashboard authentication. On the normal loopback server,
+use the same rotating session token as the dashboard. Hermes injects it into
+the loaded page as `window.__HERMES_SESSION_TOKEN__`; it is intentionally not
+printed. You can copy it from browser developer tools for local scripting:
+
+```console
+curl -H "X-Hermes-Session-Token: $TOKEN" \
+  http://127.0.0.1:9119/api/plugins/auxiliary-brain/status
+
+curl -X POST \
+  -H "X-Hermes-Session-Token: $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"text":"Completed a planned practice session."}' \
+  http://127.0.0.1:9119/api/plugins/auxiliary-brain/checkin
+```
+
+Headless `hermes serve` has no page from which to read its random token. For a
+loopback automation process, set a high-entropy `HERMES_DASHBOARD_SESSION_TOKEN`
+secret before starting `serve`, and use that same value as `$TOKEN`. On a
+non-loopback bind, Hermes' OAuth/password session gate is authoritative; the
+loopback session header intentionally does not bypass it.
+
+The check-in route accepts exactly one nonblank `text` field (maximum 8,000
+characters), always runs the fixed `progress_checkin` task, and permits no
+task, endpoint, model, process-control, or capture override. Its response omits
+raw model text and endpoint details. Requests without valid Hermes dashboard
+authentication receive `401`; the plugin has no second home-grown auth header.
+
+These routes are unavailable in a messaging-gateway-only process. Remote
+service tokens and generic run/correct APIs need a separate durable
+authentication and abuse-boundary contract and remain deferred.
 
 ### Why there is no `/brain` slash command yet
 
-Hermes supports plugin slash commands, but the current gateway busy-session
-path recognizes only built-in commands. A dynamic plugin command received
-during an in-flight turn can be treated as ordinary follow-up text and reach
-the main model. That makes a slash-command privacy promise impossible to keep.
+Hermes supports plugin slash commands, but the released gateway busy-session
+path can still treat a dynamic command received during an in-flight turn as
+ordinary follow-up text and send it to the main model. The generic host fix is
+tracked by [issue #58559](https://github.com/NousResearch/hermes-agent/issues/58559)
+and [draft PR #58591](https://github.com/NousResearch/hermes-agent/pull/58591).
+That gap makes a slash-command privacy promise impossible to keep today.
 
 The plugin therefore fails closed and does not register `/brain` yet. The
 strict local path is `hermes brain ...`. Slash read/run commands can be enabled
@@ -326,7 +394,7 @@ so `hermes plugins update auxiliary-brain` follows the latest `main`. For a
 reproducible pinned installation, clone a tag and run the checkout installer:
 
 ```console
-git clone --branch v0.2.0 --depth 1 https://github.com/kortexa-ai/hermes-auxiliary-brain.git
+git clone --branch v0.3.0 --depth 1 https://github.com/kortexa-ai/hermes-auxiliary-brain.git
 cd hermes-auxiliary-brain
 python install.py
 ```

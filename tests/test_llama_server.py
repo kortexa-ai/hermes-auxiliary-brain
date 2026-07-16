@@ -23,6 +23,7 @@ from auxiliary_brain.llama_server import (
     LlamaExecutableNotFound,
     LlamaInstallError,
     LlamaReleaseAsset,
+    LlamaServerError,
     LlamaServerStateError,
     build_server_command,
     get_release_asset,
@@ -589,3 +590,40 @@ def test_windows_stop_uses_argv_taskkill_and_rechecks_before_force(
     ]
     assert all(options["shell"] is False for _command, options in commands)
     assert identity_checks == [(4242, r"C:\llama\llama-server.exe")]
+
+
+def test_log_tail_returns_exact_last_lines_and_replaces_invalid_utf8(tmp_path: Path) -> None:
+    data_root = resolve_data_root(tmp_path)
+    data_root.mkdir(parents=True)
+    log_path = data_root / llama_server.LOG_FILENAME
+    log_path.write_bytes(b"first\nsecond\ninvalid:\xff\nlast\n")
+
+    tail = llama_server.read_llama_server_logs(hermes_home=tmp_path, lines=2)
+
+    assert tail == "invalid:\ufffd\nlast"
+
+
+@pytest.mark.parametrize("lines", [0, 10_001, True, 2.5])
+def test_log_tail_rejects_unbounded_line_counts(tmp_path: Path, lines: Any) -> None:
+    with pytest.raises(ValueError, match="between 1 and 10000"):
+        llama_server.read_llama_server_logs(hermes_home=tmp_path, lines=lines)
+
+
+def test_log_tail_explains_when_server_has_never_started(tmp_path: Path) -> None:
+    with pytest.raises(LlamaServerError, match="does not exist yet.*start the server"):
+        llama_server.read_llama_server_logs(hermes_home=tmp_path)
+
+
+def test_log_tail_caps_bytes_even_for_one_giant_line(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(llama_server, "MAX_LOG_TAIL_BYTES", 32)
+    data_root = resolve_data_root(tmp_path)
+    data_root.mkdir(parents=True)
+    (data_root / llama_server.LOG_FILENAME).write_text("x" * 100, encoding="utf-8")
+
+    tail = llama_server.read_llama_server_logs(hermes_home=tmp_path, lines=1)
+
+    assert tail.startswith("[... log tail limited to 32 bytes ...]\n")
+    assert tail.endswith("x" * 32)
