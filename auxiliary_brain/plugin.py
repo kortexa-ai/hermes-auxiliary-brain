@@ -10,6 +10,17 @@ from pathlib import Path
 from typing import Any
 
 from .config import VALID_MODES
+from .llama_server import (
+    DEFAULT_HOST,
+    DEFAULT_MODEL,
+    DEFAULT_PORT,
+    LLAMA_CPP_RELEASE,
+    LlamaServerError,
+    get_llama_server_status,
+    install_llama_cpp,
+    start_llama_server,
+    stop_llama_server,
+)
 from .local_api import DEFAULT_ENDPOINTS, discover_endpoint, probe_endpoint
 from .runtime import API_KEY_ENV, AUXILIARY_TASK_KEY, BrainRuntime, BrainRuntimeError
 from .tasks import list_tasks
@@ -73,6 +84,36 @@ def setup_cli(parser: argparse.ArgumentParser) -> None:
     )
     setup.add_argument("--max-input-chars", type=int, default=8_000)
 
+    server = sub.add_parser("server", help="manage the bundled local llama.cpp server")
+    server_sub = server.add_subparsers(dest="server_command")
+    server_install = server_sub.add_parser(
+        "install", help=f"install pinned llama.cpp {LLAMA_CPP_RELEASE}"
+    )
+    server_install.add_argument(
+        "--force", action="store_true", help="redownload and replace the pinned runtime"
+    )
+    server_start = server_sub.add_parser(
+        "start", help="download if needed, start llama.cpp, and configure the brain"
+    )
+    server_start.add_argument("--model", default=DEFAULT_MODEL)
+    server_start.add_argument("--host", default=DEFAULT_HOST)
+    server_start.add_argument("--port", type=int, default=DEFAULT_PORT)
+    server_start.add_argument("--executable", default=None)
+    server_start.add_argument(
+        "--no-install",
+        action="store_true",
+        help="fail instead of installing llama.cpp when no executable is found",
+    )
+    server_start.add_argument(
+        "--wait-seconds",
+        type=float,
+        default=600.0,
+        help="maximum startup/model-download wait (default: 600)",
+    )
+    server_sub.add_parser("status", help="show managed llama.cpp process state")
+    server_stop = server_sub.add_parser("stop", help="stop only the verified managed process")
+    server_stop.add_argument("--timeout", type=float, default=5.0)
+
     sub.add_parser("status", help="show mode, endpoint, tasks, and local data counts")
     sub.add_parser("doctor", help="refresh endpoint checks and print fixes")
     sub.add_parser("tasks", help="list built-in local task contracts")
@@ -123,6 +164,8 @@ def brain_command(args: argparse.Namespace) -> int:
                 return 1
             print("\nDoctor says: tiny brain awake. Surprisingly little screaming.")
             return 0
+        if command == "server":
+            return _cmd_server(args)
         if command == "tasks":
             for task in list_tasks():
                 print(f"{task.key:20} {task.description}")
@@ -162,7 +205,7 @@ def brain_command(args: argparse.Namespace) -> int:
             report = RUNTIME.evaluate(task_key=args.task, limit=args.limit)
             print(json.dumps(report, indent=2, ensure_ascii=False, sort_keys=True))
             return 0 if not report["failures"] else 1
-    except (BrainRuntimeError, OSError, ValueError) as exc:
+    except (BrainRuntimeError, LlamaServerError, OSError, ValueError) as exc:
         print(f"Auxiliary brain: {exc}")
         return 1
 
@@ -170,7 +213,10 @@ def brain_command(args: argparse.Namespace) -> int:
     if parser is not None:
         parser.print_help()
     else:
-        print("usage: hermes brain {setup,status,doctor,tasks,mode,run,correct,export,evaluate}")
+        print(
+            "usage: hermes brain "
+            "{setup,server,status,doctor,tasks,mode,run,correct,export,evaluate}"
+        )
     return 2
 
 
@@ -278,6 +324,64 @@ def _cmd_setup(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_server(args: argparse.Namespace) -> int:
+    action = getattr(args, "server_command", None)
+    if action == "install":
+        executable = install_llama_cpp(force=args.force)
+        print(f"Installed llama.cpp {LLAMA_CPP_RELEASE}:")
+        print(f"  executable : {executable.path}")
+        return 0
+    if action == "start":
+        status = start_llama_server(
+            executable=args.executable,
+            install_if_missing=not args.no_install,
+            model=args.model,
+            host=args.host,
+            port=args.port,
+            wait_ready_seconds=args.wait_seconds,
+        )
+        probe = probe_endpoint(status.base_url, timeout=2.0)
+        exposed_model = probe.choose_model(args.model, strict=True) if probe.reachable else None
+        if exposed_model is None:
+            available = ", ".join(probe.models) or "none"
+            detail = probe.error or f"requested model not exposed; available: {available}"
+            raise BrainRuntimeError(
+                f"managed server started but model verification failed: {detail}; "
+                f"see {status.log_path}"
+            )
+        try:
+            current = RUNTIME.config()
+        except BrainRuntimeError:
+            current = None
+        RUNTIME.save_configuration(
+            base_url=status.base_url,
+            model=exposed_model,
+            mode=current.mode if current is not None else "explicit",
+            capture=current.capture if current is not None else True,
+            auto_discover=False,
+            timeout_seconds=current.timeout_seconds if current is not None else 8.0,
+            discovery_timeout_seconds=(
+                current.discovery_timeout_seconds if current is not None else 0.75
+            ),
+            max_input_chars=current.max_input_chars if current is not None else 8_000,
+        )
+        print("Managed auxiliary brain is ready:")
+        print(f"  endpoint   : {status.base_url}")
+        print(f"  model      : {exposed_model}")
+        print(f"  PID        : {status.pid}")
+        print(f"  log        : {status.log_path}")
+        return 0
+    if action == "status":
+        status = get_llama_server_status()
+        print(_format_server_status(status))
+        return 0 if status.running and status.ready else 1
+    if action == "stop":
+        status = stop_llama_server(timeout_seconds=args.timeout)
+        print(_format_server_status(status))
+        return 0
+    raise BrainRuntimeError("choose a server action: install, start, status, or stop")
+
+
 def _parse_json_object(value: str) -> dict[str, Any]:
     try:
         decoded = json.loads(value, parse_constant=_reject_json_constant)
@@ -335,4 +439,20 @@ def _format_status(status: dict[str, Any]) -> str:
         f"{stats['events']} events, {stats['predictions']} predictions, "
         f"{stats['corrections']} corrections"
     )
+    return "\n".join(lines)
+
+
+def _format_server_status(status: Any) -> str:
+    state = "ready" if status.ready else "starting" if status.running else "stopped"
+    lines = [
+        "Managed llama.cpp server",
+        f"  state      : {state}",
+        f"  endpoint   : {status.base_url}",
+        f"  model      : {status.model}",
+        f"  PID        : {status.pid or '-'}",
+        f"  executable : {status.executable or '-'}",
+        f"  log        : {status.log_path}",
+    ]
+    if status.error:
+        lines.append(f"  error      : {status.error}")
     return "\n".join(lines)

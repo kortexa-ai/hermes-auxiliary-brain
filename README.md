@@ -40,12 +40,26 @@ Hermes' native plugin installer is the recommended path:
 hermes plugins install kortexa-ai/hermes-auxiliary-brain --enable
 ```
 
-Start one of the local servers described below, then use a fresh Hermes process
-and let the plugin find it:
+Use a fresh Hermes process and let the plugin install, start, and configure its
+default local server:
 
 ```console
-hermes brain setup --auto
+hermes brain server start
 hermes brain doctor
+```
+
+The first start downloads the checksum-pinned llama.cpp CPU build for your
+platform, then llama.cpp downloads `LiquidAI/LFM2.5-230M-GGUF:Q4_K_M`. Both
+the runtime and model cache stay under the active Hermes profile. The server
+binds to `127.0.0.1:8080`; the plugin saves that endpoint only after the server
+is ready and reports the exact requested model.
+
+Useful lifecycle commands:
+
+```console
+hermes brain server status
+hermes brain server stop
+hermes brain server install --force
 ```
 
 Restart a running messaging gateway after installation if you enable the
@@ -81,6 +95,9 @@ installer honors `HERMES_HOME` and then uses Hermes' platform default
 (`%LOCALAPPDATA%\hermes` on Windows, `~/.hermes` elsewhere).
 
 ## Start a local model
+
+`hermes brain server start` is the simplest path. If you already use another
+local server, the plugin can discover these loopback endpoints instead:
 
 The plugin probes these loopback endpoints, in order:
 
@@ -137,7 +154,7 @@ vllm serve LiquidAI/LFM2.5-230M
 Use another OpenAI-compatible server or model if you prefer; pass its base URL
 and model to `hermes brain setup` instead of using auto-discovery. The plugin
 accepts only `localhost` or loopback IP addresses; a server on another machine
-is deliberately outside the v0.1 trust boundary.
+is deliberately outside the current trust boundary.
 
 Local/keyless is the default. If an endpoint requires a bearer token, put the
 optional credential in the active Hermes profile's `.env`, never in
@@ -183,7 +200,7 @@ treats its input as data, not instructions.
 
 Use `hermes brain --help` for the command catalog installed by your version.
 
-### Why there is no `/brain` slash command in v0.1
+### Why there is no `/brain` slash command yet
 
 Hermes supports plugin slash commands, but the current gateway busy-session
 path recognizes only built-in commands. A dynamic plugin command received
@@ -267,7 +284,7 @@ The repository is a standalone user plugin. It registers existing Hermes
 extension surfaces (a CLI command, lifecycle hook, and auxiliary-model task)
 and does not modify `hermes-agent` core files.
 The auxiliary task contributes the normal Hermes model-picker/config location,
-but v0.1 deliberately accepts only its `custom` local endpoint/model/timeout
+but the plugin deliberately accepts only its `custom` local endpoint/model/timeout
 fields. Inference uses the plugin's proxy-free, redirect-free loopback client;
 provider fallbacks and cloud credential profiles are never consulted.
 The longer [feasibility review](docs/feasibility.md) explains why the first
@@ -291,6 +308,32 @@ release uses these surfaces instead of a transparent mid-conversation router.
   autonomous authority.
 - The research-note task organizes claims and questions; it does not verify
   them or make decisions on the user's behalf.
+
+## Versioning and releases
+
+Plugin releases follow Semantic Versioning:
+
+- patch: compatible fixes and hardening;
+- minor: backward-compatible capabilities;
+- major: incompatible command, configuration, or data-contract changes.
+
+`auxiliary_brain/version.py` is the canonical Python version. The static
+`plugin.yaml` version must match it, and CI enforces that parity. Releases are
+tagged `vMAJOR.MINOR.PATCH` and published through GitHub Releases.
+
+Hermes currently installs `owner/repo` from that repository's default branch,
+so `hermes plugins update auxiliary-brain` follows the latest `main`. For a
+reproducible pinned installation, clone a tag and run the checkout installer:
+
+```console
+git clone --branch v0.2.0 --depth 1 https://github.com/kortexa-ai/hermes-auxiliary-brain.git
+cd hermes-auxiliary-brain
+python install.py
+```
+
+Database schema, exported-dataset format, and task-contract hashes are
+versioned independently. A plugin release does not imply a database migration
+or silently make old training examples compatible with a changed prompt.
 
 ## Update or remove
 

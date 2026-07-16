@@ -31,6 +31,7 @@ from .tasks import (
     parse_task_result,
     validate_json,
 )
+from .version import __version__
 
 __all__ = [
     "BUILTIN_TASKS",
@@ -60,4 +61,5 @@ __all__ = [
     "parse_task_result",
     "probe_endpoint",
     "validate_json",
+    "__version__",
 ]

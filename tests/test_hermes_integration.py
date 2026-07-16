@@ -178,11 +178,16 @@ def test_real_hermes_discovers_and_registers_the_plugin(
     loaded = manager._plugins["auxiliary-brain"]
     assert loaded.enabled is True
     assert loaded.error is None
-    assert manager._plugin_commands == {}, "v0.1 must not expose dynamic slash commands"
+    assert manager._plugin_commands == {}, "the plugin must not expose unsafe slash commands"
     assert "brain" in manager._cli_commands
     assert set(manager._aux_tasks) == {"auxiliary_brain_reflex"}
     assert manager.has_hook("pre_llm_call")
     assert manager._plugin_tool_names == set(), "the sidecar must not grow core tools"
+    parser = argparse.ArgumentParser()
+    manager._cli_commands["brain"]["setup_fn"](parser)
+    server_args = parser.parse_args(["server", "start"])
+    assert server_args.brain_command == "server"
+    assert server_args.server_command == "start"
 
 
 @pytest.mark.skipif(

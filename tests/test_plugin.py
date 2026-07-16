@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -9,6 +10,7 @@ import pytest
 
 from auxiliary_brain import plugin
 from auxiliary_brain.config import BrainConfig
+from auxiliary_brain.llama_server import LlamaServerError, LlamaServerStatus
 from auxiliary_brain.local_api import EndpointProbe
 from auxiliary_brain.runtime import BrainRuntimeError, RunResult
 
@@ -44,6 +46,172 @@ class FakeRuntime:
         if not self.results:
             raise AssertionError("unexpected local inference")
         return self.results.pop(0)
+
+
+def server_status(
+    tmp_path: Path,
+    *,
+    running: bool = True,
+    ready: bool = True,
+) -> LlamaServerStatus:
+    return LlamaServerStatus(
+        running=running,
+        ready=ready,
+        identity_verified=running,
+        pid=4242 if running else None,
+        host="127.0.0.1",
+        port=8080,
+        model="LiquidAI/LFM2.5-230M-GGUF:Q4_K_M",
+        executable=str(tmp_path / "llama-server") if running else None,
+        started_at="2026-07-16T12:00:00+00:00" if running else None,
+        log_path=tmp_path / "llama-server.log",
+        state_path=tmp_path / "llama-server.json",
+    )
+
+
+def test_server_parser_exposes_managed_lifecycle() -> None:
+    parser = argparse.ArgumentParser()
+    plugin.setup_cli(parser)
+
+    assert parser.parse_args(["server", "install"]).server_command == "install"
+    start = parser.parse_args(["server", "start"])
+    assert start.server_command == "start"
+    assert start.model == "LiquidAI/LFM2.5-230M-GGUF:Q4_K_M"
+    assert start.host == "127.0.0.1"
+    assert start.port == 8080
+    assert start.wait_seconds == 600.0
+    assert parser.parse_args(["server", "status"]).server_command == "status"
+    assert parser.parse_args(["server", "stop"]).server_command == "stop"
+
+
+def test_server_start_waits_verifies_exact_model_then_configures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    status = server_status(tmp_path)
+    observed: dict[str, Any] = {}
+
+    class ManagedRuntime:
+        def config(self) -> BrainConfig:
+            return BrainConfig(
+                mode="assist",
+                capture=False,
+                timeout_seconds=11,
+                discovery_timeout_seconds=1.25,
+                max_input_chars=4096,
+            )
+
+        def save_configuration(self, **kwargs: Any) -> BrainConfig:
+            observed["saved"] = kwargs
+            return BrainConfig(**kwargs)
+
+    def fake_start(**kwargs: Any) -> LlamaServerStatus:
+        observed["start"] = kwargs
+        return status
+
+    monkeypatch.setattr(plugin, "RUNTIME", ManagedRuntime())
+    monkeypatch.setattr(plugin, "start_llama_server", fake_start)
+    monkeypatch.setattr(
+        plugin,
+        "probe_endpoint",
+        lambda *_args, **_kwargs: EndpointProbe(
+            status.base_url,
+            reachable=True,
+            models=(status.model,),
+        ),
+    )
+    parser = argparse.ArgumentParser()
+    plugin.setup_cli(parser)
+
+    exit_code = plugin.brain_command(parser.parse_args(["server", "start"]))
+
+    assert exit_code == 0
+    assert observed["start"] == {
+        "executable": None,
+        "install_if_missing": True,
+        "model": status.model,
+        "host": "127.0.0.1",
+        "port": 8080,
+        "wait_ready_seconds": 600.0,
+    }
+    assert observed["saved"] == {
+        "base_url": status.base_url,
+        "model": status.model,
+        "mode": "assist",
+        "capture": False,
+        "auto_discover": False,
+        "timeout_seconds": 11,
+        "discovery_timeout_seconds": 1.25,
+        "max_input_chars": 4096,
+    }
+    assert "Managed auxiliary brain is ready" in capsys.readouterr().out
+
+
+def test_server_start_model_mismatch_leaves_configuration_unchanged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    status = server_status(tmp_path)
+
+    class UnchangedRuntime:
+        def save_configuration(self, **_kwargs: Any) -> None:
+            pytest.fail("configuration must not change before exact model verification")
+
+    monkeypatch.setattr(plugin, "RUNTIME", UnchangedRuntime())
+    monkeypatch.setattr(plugin, "start_llama_server", lambda **_kwargs: status)
+    monkeypatch.setattr(
+        plugin,
+        "probe_endpoint",
+        lambda *_args, **_kwargs: EndpointProbe(
+            status.base_url,
+            reachable=True,
+            models=("some-other-model",),
+        ),
+    )
+    parser = argparse.ArgumentParser()
+    plugin.setup_cli(parser)
+
+    exit_code = plugin.brain_command(parser.parse_args(["server", "start"]))
+
+    assert exit_code == 1
+    output = capsys.readouterr().out
+    assert "model verification failed" in output
+    assert str(status.log_path) in output
+
+
+def test_server_manager_errors_are_safe_cli_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        plugin,
+        "start_llama_server",
+        lambda **_kwargs: (_ for _ in ()).throw(LlamaServerError("tiny engine unavailable")),
+    )
+    parser = argparse.ArgumentParser()
+    plugin.setup_cli(parser)
+
+    assert plugin.brain_command(parser.parse_args(["server", "start"])) == 1
+    assert "Auxiliary brain: tiny engine unavailable" in capsys.readouterr().out
+
+
+def test_server_status_and_stop_use_managed_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    stopped = server_status(tmp_path, running=False, ready=False)
+    monkeypatch.setattr(plugin, "get_llama_server_status", lambda: stopped)
+    monkeypatch.setattr(plugin, "stop_llama_server", lambda **_kwargs: stopped)
+    parser = argparse.ArgumentParser()
+    plugin.setup_cli(parser)
+
+    assert plugin.brain_command(parser.parse_args(["server", "status"])) == 1
+    assert "state      : stopped" in capsys.readouterr().out
+    assert plugin.brain_command(parser.parse_args(["server", "stop"])) == 0
+    assert "state      : stopped" in capsys.readouterr().out
 
 
 def test_cli_mode_changes_behavior_without_inference(

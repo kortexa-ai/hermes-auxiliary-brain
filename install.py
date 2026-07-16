@@ -198,7 +198,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.no_enable:
         print(f"Enable it later with: hermes plugins enable {PLUGIN_NAME}")
     elif enabled:
-        print("Plugin enabled. Start a new Hermes session, then run: hermes brain setup --auto")
+        print("Plugin enabled. Start a new Hermes session, then run: hermes brain server start")
     return 0 if enabled else 2
 
 

@@ -17,6 +17,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
+from .version import __version__
+
 DEFAULT_ENDPOINTS: tuple[str, ...] = (
     "http://127.0.0.1:1234/v1",  # LM Studio
     "http://127.0.0.1:8080/v1",  # llama.cpp
@@ -245,7 +247,7 @@ def _request_json(
 ) -> dict[str, Any]:
     headers = {
         "Accept": "application/json",
-        "User-Agent": "hermes-auxiliary-brain/0.1",
+        "User-Agent": f"hermes-auxiliary-brain/{__version__}",
     }
     data = None
     if body is not None:

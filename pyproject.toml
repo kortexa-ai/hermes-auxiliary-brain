@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hermes-auxiliary-brain"
-version = "0.1.0"
+dynamic = ["version"]
 description = "A small local-model sidecar for Hermes Agent"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -24,6 +24,9 @@ classifiers = [
 Homepage = "https://github.com/kortexa-ai/hermes-auxiliary-brain"
 Repository = "https://github.com/kortexa-ai/hermes-auxiliary-brain"
 Issues = "https://github.com/kortexa-ai/hermes-auxiliary-brain/issues"
+
+[tool.setuptools.dynamic]
+version = { attr = "auxiliary_brain.version.__version__" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

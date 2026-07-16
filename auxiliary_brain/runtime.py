@@ -23,9 +23,10 @@ from .local_api import (
 )
 from .store import BrainStore, PredictionRecord
 from .tasks import BASE_INSTRUCTION, TaskParseError, get_task, list_tasks
+from .version import __version__
 
 PLUGIN_ID = "auxiliary-brain"
-PLUGIN_VERSION = "0.1.0"
+PLUGIN_VERSION = __version__
 AUXILIARY_TASK_KEY = "auxiliary_brain_reflex"
 API_KEY_ENV = "AUXILIARY_BRAIN_API_KEY"
 

@@ -128,14 +128,14 @@ without changing the plugin.
     verify process identity before stop and reject non-loopback binds.
   - [x] Exercise the real pinned Windows asset and a real LFM download,
     start, health check, and stop lifecycle.
-  - [ ] Wire `hermes brain server start|status|logs|stop` into the plugin CLI.
-  - [ ] Configure the auxiliary-brain endpoint only after the server is ready
+  - [x] Wire `hermes brain server install|start|status|stop` into the plugin CLI.
+  - [x] Configure the auxiliary-brain endpoint only after the server is ready
     and reports the requested model.
   - [ ] Finish operator documentation, the complete test pass, and an isolated
     install-from-GitHub smoke test.
   - [ ] Tag and publish `v0.1.0`, then tag and publish `v0.2.0` with release notes.
 
-- [ ] **11. Make operation and diagnosis obvious (`v0.3.0`)** - planned
+- [ ] **11. Make operation and diagnosis obvious (`v0.3.0`)** - in progress
   - Keep `status` as the quick read-only snapshot. Expand it to show the plugin
     version, active profile, effective configuration, configured endpoint and
     model, managed-versus-external server ownership, PID/binary/build/port,
@@ -152,21 +152,14 @@ without changing the plugin.
     `hermes brain --help`, with a few copy-paste examples and no model call.
   - Add `hermes brain server logs [--lines N]`; status and doctor should point
     to it when startup fails.
-  - Candidate training-preparation slice: add `hermes brain train status` and
-    `train prepare`. They may lint corrected examples and create a deterministic
-    TRL `messages` train/holdout bundle plus a reproducibility manifest, but
-    must not install an ML stack, change weights, upload data, or promote a
-    model in v0.3.0.
   - Do not add a second mutable `config` command merely to print settings.
     `status` owns inspection; `setup` and `mode` remain the mutation paths.
-  - Candidate if it stays small: expose authenticated, bounded dashboard-plugin
-    routes for JSON `status`, `doctor`, and `tasks`, plus one fixed-purpose
-    `POST /checkin` route. Reuse the same report/runtime code, cap inputs, and
-    allow no endpoint/model override. No unauthenticated route and no remote
-    server/process control.
+  - Expose authenticated, bounded dashboard-plugin routes for JSON `status`
+    and a fixed-purpose `POST /checkin` route. Reuse the same report/runtime
+    code, cap inputs, and allow no endpoint/model override. No unauthenticated
+    route and no remote server/process control.
 
-- [ ] **12. Support remote gateway check-ins safely** - host dependency;
-  target `v0.4.0`, or fold into `v0.3.0` only if the host fix lands first
+- [ ] **12. Support remote gateway check-ins safely (`v0.4.0`)** - host dependency
   - Hermes already dispatches plugin slash commands while a session is idle.
     Its running-agent fast path currently resolves built-in commands only, so
     an unknown dynamic `/brain` command may be treated as conversational
@@ -176,6 +169,12 @@ without changing the plugin.
     "wait or /stop" response while a turn is busy. Concurrent plugin-command
     execution can remain a separate future contract. Preserve platform command
     authorization and never inject the command as a user turn.
+  - Upstream already tracks this exact generic contract in
+    [issue #58559](https://github.com/NousResearch/hermes-agent/issues/58559).
+    [Draft PR #58591](https://github.com/NousResearch/hermes-agent/pull/58591)
+    covers plugin and skill detection at both active-session layers, applies
+    slash access control, and prevents dynamic commands becoming pending agent
+    text. Do not create a competing Kortexa patch while that work is active.
   - After that contract exists, register a narrow gateway `/brain` surface for
     `help`, sanitized `status`, and bounded task/check-in execution. Keep
     setup, endpoint changes, server start/stop, export, evaluation, and training
@@ -198,9 +197,9 @@ without changing the plugin.
     `command.dispatch` can invoke plugin slash handlers after `/brain` is
     safely registered. Treat these as host APIs, not reasons to invent a
     second daemon in this plugin.
-  - The read-only dashboard routes in step 11 are low-to-medium effort and need
-    no Hermes core change. Document clearly that they are unavailable when only
-    the messaging gateway is running.
+  - The authenticated status/check-in dashboard routes in step 11 ship in
+    `v0.3.0` and need no Hermes core change. Document clearly that they are
+    unavailable when only the messaging gateway is running.
   - Apart from the deliberately narrow `POST /checkin` candidate, defer
     mutating/headless endpoints such as generic `POST /run`, `POST /correct`,
     or service bearer-token access until the contract includes strict body
@@ -231,6 +230,10 @@ without changing the plugin.
   - Require baseline-versus-candidate evaluation, per-task thresholds, explicit
     human promotion, rollback, and artifact provenance. Never train or promote
     merely because enough time or examples elapsed.
+  - Add `hermes brain train status` and `hermes brain train prepare` here, not
+    in `v0.3.0`. `status` reports training readiness without changing weights;
+    `prepare` lints reviewed examples and creates the deterministic TRL
+    train/holdout bundle plus reproducibility manifest used by the trainer.
   - Support local GPU, Apple Silicon where the selected trainer supports it,
     and an explicit user-selected remote GPU runner later. CPU-only training
     may be allowed for experiments but must not be marketed as the happy path.
@@ -249,11 +252,11 @@ without changing the plugin.
 | Rich `status`, actionable `doctor`, `--json` | Small | `v0.3.0` | Extends existing code and unlocks scripts/API reuse. |
 | Explicit `hermes brain help` | Tiny | `v0.3.0` | Argparse help already exists; this improves discovery. |
 | Managed server log tail | Small | `v0.3.0` | State/log ownership already exists in `v0.2.0`. |
-| Authenticated dashboard status and fixed check-in API | Small-medium | `v0.3.0` candidate | Supported plugin surface; auth, caps, and packaging need E2E proof. |
+| Authenticated dashboard status and fixed check-in API | Small-medium | `v0.3.0` | Supported plugin surface; reuse host auth, enforce caps, and prove packaging E2E. |
 | Direct task/correction service API | Medium | `v0.4.0` or later | Needs a durable auth, idempotency, and abuse-boundary contract. |
-| Busy-safe messaging `/brain` | Small core fix, cross-repo risk | `v0.4.0`, possibly `v0.3.0` | Plugin code is easy; the generic Hermes busy-path contract must land first. |
-| Training readiness and deterministic bundle | Medium | `v0.3.0` candidate | Useful without ML dependencies; establishes the later trainer contract. |
-| LoRA train/convert/evaluate/promote | Large | `v0.5.0` | Separate ML environment, hardware, reproducibility, and rollback work. |
+| Busy-safe messaging `/brain` | Small core fix, cross-repo risk | `v0.4.0` | Upstream #58591 must land before the plugin exposes the command. |
+| Training readiness and deterministic bundle | Medium | `v0.5.0` | Ship with the trainer contract instead of freezing a premature bundle format. |
+| LoRA train/convert/evaluate/promote/rollback | Large | `v0.5.0` | Separate ML environment, hardware, reproducibility, and rollback work. |
 
 ## Acceptance criteria for v0.1.0
 
@@ -313,3 +316,7 @@ without changing the plugin.
   training. Scoped the low-risk operator work to v0.3.0, recorded the Hermes
   busy-plugin-command dependency, and separated training into an explicit
   evaluate/promote/rollback workstream.
+- 2026-07-16: Verified upstream issue #58559 and draft PR #58591 already cover
+  the generic busy-session plugin/skill command gap, so no duplicate Hermes
+  branch or PR was opened. Committed authenticated status/check-in API work to
+  v0.3.0 and moved both training status and bundle preparation to v0.5.0.

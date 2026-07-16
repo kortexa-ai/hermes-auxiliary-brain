@@ -12,6 +12,7 @@ from auxiliary_brain import runtime as runtime_module
 from auxiliary_brain.config import BrainConfig
 from auxiliary_brain.local_api import EndpointProbe
 from auxiliary_brain.runtime import BrainRuntime, BrainRuntimeError, RunResult
+from auxiliary_brain.version import __version__
 
 GENERIC_OUTPUT = {
     "summary": "A compact result",
@@ -128,7 +129,7 @@ def test_run_returns_result_and_captures_reviewable_records(
     assert event is not None
     assert event.input_text == "Summarize this note"
     assert event.metadata["source"] == "test"
-    assert event.metadata["plugin_version"] == "0.1.0"
+    assert event.metadata["plugin_version"] == __version__
     assert event.metadata["repaired"] is False
     assert event.metadata["turn_id"] == "turn-1"
     assert len(event.metadata["task_contract_hash"]) == 64
