@@ -116,6 +116,16 @@ without changing the plugin.
   - GitHub Actions passed tests on Python 3.11, 3.12, and 3.13 plus Ruff lint
     and format checks.
 
+- [ ] **10. Ship the one-command local server** - in progress
+  - Add `hermes brain server start|status|stop`.
+  - Default to `LiquidAI/LFM2.5-230M-GGUF:Q4_K_M` on `127.0.0.1:8080`.
+  - Reuse an installed `llama`/`llama-server`, otherwise download a pinned,
+    checksum-verified llama.cpp CPU release into the active Hermes profile.
+  - Let llama.cpp download and cache the GGUF through its official `-hf` path.
+  - Keep PID metadata and logs profile-local; refuse unsafe stop operations.
+  - Configure the auxiliary-brain endpoint after the server becomes ready.
+  - Release as plugin `v0.2.0` with SemVer tags and GitHub release notes.
+
 ## Acceptance criteria for v0.1.0
 
 - A user can clone the repository, run one installer command, start/restart
@@ -167,3 +177,5 @@ without changing the plugin.
   `https://github.com/kortexa-ai/hermes-auxiliary-brain` on `main`.
 - 2026-07-16: Reinstalled the public repository through Hermes' native plugin
   installer and confirmed the remote CI matrix is green. The tiny goblin ships.
+- 2026-07-16: Started v0.2.0 work on a pinned, one-command llama.cpp + default
+  LFM server lifecycle, plus a reproducible plugin version/tag story.
