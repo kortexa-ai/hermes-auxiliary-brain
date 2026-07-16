@@ -10,6 +10,8 @@ venv/
 uv.lock
 build/
 dist/
+!dashboard/dist/
+!dashboard/dist/index.js
 
 # Local brain state and exported training data never belong in Git.
 *.db

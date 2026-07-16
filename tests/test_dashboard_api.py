@@ -38,6 +38,7 @@ def test_dashboard_manifest_is_hidden_and_declares_api() -> None:
     assert manifest["tab"]["hidden"] is True
     assert manifest["api"] == "plugin_api.py"
     assert manifest["entry"] == "dist/index.js"
+    assert (manifest_path.parent / manifest["entry"]).is_file()
 
 
 def test_status_passes_refresh_and_returns_runtime_report(
