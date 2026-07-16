@@ -1,0 +1,18 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.coverage
+.pytest_cache/
+.ruff_cache/
+.tmp/
+.venv/
+venv/
+uv.lock
+build/
+dist/
+
+# Local brain state and exported training data never belong in Git.
+*.db
+*.db-shm
+*.db-wal
+exports/

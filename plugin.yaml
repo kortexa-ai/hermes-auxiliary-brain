@@ -1,0 +1,9 @@
+name: auxiliary-brain
+version: 0.1.0
+description: "A small local-model sidecar for bounded classification, extraction, and reviewable learning."
+author: Kortexa AI
+kind: standalone
+platforms:
+  - linux
+  - macos
+  - windows

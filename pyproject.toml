@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hermes-auxiliary-brain"
+version = "0.1.0"
+description = "A small local-model sidecar for Hermes Agent"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+authors = [{ name = "Kortexa AI" }]
+keywords = ["hermes-agent", "local-llm", "lfm", "privacy"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+]
+
+[project.urls]
+Homepage = "https://github.com/kortexa-ai/hermes-auxiliary-brain"
+Repository = "https://github.com/kortexa-ai/hermes-auxiliary-brain"
+Issues = "https://github.com/kortexa-ai/hermes-auxiliary-brain/issues"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
