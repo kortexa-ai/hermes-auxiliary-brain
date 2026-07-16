@@ -109,6 +109,13 @@ without changing the plugin.
   - Created public `kortexa-ai/hermes-auxiliary-brain` and configured `origin`.
   - Pushed `main`; GitHub reports it as the public default branch.
 
+- [x] **9. Validate the published artifact**
+  - Installed `kortexa-ai/hermes-auxiliary-brain --enable` through Hermes' native
+    Git installer into an isolated profile.
+  - Loaded the installed `hermes brain --help` command tree from that profile.
+  - GitHub Actions passed tests on Python 3.11, 3.12, and 3.13 plus Ruff lint
+    and format checks.
+
 ## Acceptance criteria for v0.1.0
 
 - A user can clone the repository, run one installer command, start/restart
@@ -158,3 +165,5 @@ without changing the plugin.
   the token is never sprayed across unrelated local services.
 - 2026-07-16: Published the initial build to
   `https://github.com/kortexa-ai/hermes-auxiliary-brain` on `main`.
+- 2026-07-16: Reinstalled the public repository through Hermes' native plugin
+  installer and confirmed the remote CI matrix is green. The tiny goblin ships.
