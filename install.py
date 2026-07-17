@@ -23,9 +23,10 @@ PLUGIN_NAME = "auxiliary-brain"
 RUNTIME_PATHS = (
     "plugin.yaml",
     "__init__.py",
+    "LICENSE",
     "auxiliary_brain",
     "dashboard",
-    "SKILL.md",
+    "docs",
     "after-install.md",
 )
 

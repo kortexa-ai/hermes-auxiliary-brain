@@ -1,6 +1,6 @@
 # Hermes Auxiliary Brain - Working Plan
 
-Last updated: 2026-07-16
+Last updated: 2026-07-17
 
 This file is the rude-raccoon recovery point. It records what we are building,
 why the design looks this way, and what has actually been completed.
@@ -230,6 +230,46 @@ without changing the plugin.
     authenticated Hermes surface; Hermes talks to the loopback model.
 
 - [ ] **14. Add an explicit training and promotion pipeline (`v0.5.0`)** - larger workstream
+  - **Local implementation checkpoint (not pushed or released):**
+    - [x] Added dependency-free readiness inspection and content-addressed
+      train/holdout bundles with exact task messages, current-contract checks,
+      deterministic normalized-input grouping, secret lint, explicit review of
+      unattributed gateway rows, and non-promotable small-dataset experiments.
+    - [x] Added checksum-pinned local model and LoRA artifact support to the
+      managed llama.cpp process state. Generic `--lora` overrides remain
+      blocked; old state files remain readable.
+    - [x] Added separate profile-local trainer and converter environment
+      contracts so Torch/TRL never become Hermes runtime dependencies.
+    - [x] Added low-memory TRL/PEFT orchestration, pinned llama.cpp source
+      acquisition, PEFT-to-GGUF conversion, frozen-holdout Q4 evaluation,
+      explicit promotion, transactional managed-server restart, and rollback.
+    - [x] Added focused data, trainer-backend, orchestration, managed-adapter,
+      and CLI lifecycle tests without importing ML packages into Hermes.
+    - [x] Hardened artifact provenance, bounded reads/logs/reports, sanitized
+      child environments, exact managed-server identity, Windows/Linux child
+      lifetime, deterministic max-100 holdout evaluation, and transactional
+      candidate cleanup. The official Linux llama.cpp symlink layout is
+      preserved and verified without allowing links outside the runtime tree.
+      Readiness and bundle creation now preflight and stream only the selected
+      correction from one bounded SQLite snapshot, one row at a time.
+    - [x] Finished the complete existing regression suite and two independent
+      final reviews. The local suite reports 345 passed / 11 optional skips;
+      all eight adjacent-Hermes integration tests pass, for 353 passing tests
+      and three platform-only skips when that checkout is enabled. Ruff,
+      formatting, compilation, and diff checks are clean.
+    - [x] Installed the working tree into a fresh temporary profile without
+      enabling it, then loaded version 0.5.0 and ran `train status --json` from
+      the installed copy. This smoke did not download or load model weights.
+    - [x] Passed the hard gate on this laptop: a two-step rank-8 CUDA LoRA must
+      train, convert with llama.cpp `b10046`, load beside the exact pinned Q4
+      base, and produce a schema-valid completion. Keep the smoke candidate
+      permanently non-promotable regardless of its toy score.
+      The live proof used the RTX 3070 Laptop GPU with batch 1 and 512 tokens;
+      training took 1.4 seconds after model load, conversion produced a
+      494,592-byte GGUF adapter, and all eight candidate holdout calls were
+      schema-valid. The toy accuracy remained zero, as expected from two steps.
+    - [ ] Run a meaningful corrected-data training/evaluation cycle before
+      declaring `v0.5.0` releasable. No push, tag, or release is authorized yet.
   - The current correction/export/evaluate loop is the data foundation, but
     the managed llama.cpp server is an inference runtime, not a trainer.
     Do not productize llama.cpp's own finetune example: upstream describes it
@@ -302,6 +342,16 @@ without changing the plugin.
   and extraction loop proves useful.
 - Automatic adapter selection per task; first prove one reviewed adapter can be
   trained, evaluated, promoted, and rolled back safely.
+- Add authenticated llama.cpp requests (or another per-profile ownership
+  proof) before treating loopback as private on shared-user hosts; randomize
+  the ephemeral evaluation port as a smaller defense-in-depth step.
+- Add a macOS parent-death watchdog for MPS jobs. Normal interruption is
+  cleaned up now, but a force-killed parent can leave a child on Darwin.
+- Compare the live managed base/adapter identity with the deployment pointer in
+  status/doctor, then consider a two-phase deployment journal for abrupt-power
+  recovery. The documented v0.5 recovery is server stop followed by start.
+- Add explicit retention/prune commands for plaintext bundles, run logs,
+  caches, and old adapters.
 
 ## Progress log
 
@@ -372,3 +422,21 @@ without changing the plugin.
   GitHub Release were published, and a fresh native Git install loaded the
   exact release commit, default-off gate, acknowledged enable, and `/brain`
   help. The release raccoon has traded its helmet for a tiny clipboard.
+- 2026-07-17: Implemented the local v0.5 training lifecycle: deterministic
+  privacy-gated bundles, isolated low-memory TRL/PEFT training, pinned
+  PEFT-to-GGUF conversion, exact-Q4 baseline/candidate evaluation, explicit
+  promotion, transactional managed-server restart, rollback, and bounded logs.
+- 2026-07-17: Passed the real infrastructure smoke on the weak laptop. The
+  first 256-token attempt correctly failed before training because truncation
+  removed every assistant token; after measuring the 327-token examples, the
+  default moved to 512 and the CUDA train/convert/load/schema-validation path
+  passed. The synthetic candidate remains non-promotable. No push, tag, or
+  release has been made; a meaningful corrected-data cycle remains required.
+- 2026-07-17: Completed the memory-conscious v0.5 hardening pass without
+  loading the model again: exact model/converter/runtime provenance, safe
+  subprocess environments and parent-lifetime handling, bounded deterministic
+  evaluation, immutable deployment validation, and fresh-profile packaging.
+  The complete plugin plus adjacent-Hermes suite is green (353 passed, three
+  platform-only skips), and independent security/final reviews found no
+  remaining ship blocker. Changes remain local on `main`; no push, tag, or
+  release was made.

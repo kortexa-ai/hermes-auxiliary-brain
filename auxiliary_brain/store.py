@@ -14,6 +14,28 @@ from typing import Any
 
 SCHEMA_VERSION = 1
 DATASET_FORMAT_VERSION = 1
+_TRAINING_SOURCE_BYTES_SQL = """
+    length(CAST(p.id AS BLOB))
+    + length(CAST(p.task_key AS BLOB))
+    + length(CAST(e.input_text AS BLOB))
+    + length(CAST(e.metadata_json AS BLOB))
+    + length(CAST(COALESCE(c.corrected_json, p.output_json) AS BLOB))
+    + length(CAST(COALESCE(c.note, '') AS BLOB))
+    + length(CAST(COALESCE(p.model, '') AS BLOB))
+"""
+_TRAINING_EXAMPLES_FROM_SQL = """
+    FROM predictions AS p
+    JOIN events AS e ON e.id = p.event_id
+    LEFT JOIN corrections AS c ON c.id = (
+        SELECT c2.id
+        FROM corrections AS c2
+        WHERE c2.prediction_id = p.id
+        ORDER BY c2.created_at DESC, c2.rowid DESC
+        LIMIT 1
+    )
+    WHERE (? IS NULL OR p.task_key = ?)
+      AND (? = 0 OR c.id IS NOT NULL)
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -248,58 +270,185 @@ class BrainStore:
     ) -> list[dict[str, Any]]:
         """Return deterministic examples, preferring the latest correction."""
 
-        if limit is not None and not 1 <= limit <= 1_000_000:
-            raise ValueError("limit must be between 1 and 1000000")
-        query = """
+        return list(
+            self.iter_training_examples(
+                task_key=task_key,
+                corrected_only=corrected_only,
+                limit=limit,
+            )
+        )
+
+    def training_examples_usage(
+        self,
+        *,
+        task_key: str | None = None,
+        corrected_only: bool = True,
+    ) -> dict[str, int]:
+        """Count source rows and bytes without materializing personal text."""
+
+        with self._connect() as connection:
+            return self._training_examples_usage(
+                connection,
+                task_key=task_key,
+                corrected_only=corrected_only,
+            )
+
+    def bounded_training_examples(
+        self,
+        *,
+        task_key: str | None = None,
+        corrected_only: bool = True,
+        limit: int | None = None,
+        max_examples: int,
+        max_bytes: int,
+        max_row_bytes: int,
+    ) -> tuple[dict[str, int], Iterator[dict[str, Any]]]:
+        """Preflight and stream the exact selected columns from one read snapshot."""
+
+        _validate_training_example_limits(
+            limit=limit,
+            max_examples=max_examples,
+            max_bytes=max_bytes,
+            max_row_bytes=max_row_bytes,
+        )
+        connection = self._open_connection()
+        try:
+            connection.execute("BEGIN")
+            usage = self._training_examples_usage(
+                connection,
+                task_key=task_key,
+                corrected_only=corrected_only,
+            )
+            if (
+                usage["examples"] > max_examples
+                or usage["bytes"] > max_bytes
+                or usage["max_row_bytes"] > max_row_bytes
+            ):
+                connection.rollback()
+                connection.close()
+                return usage, iter(())
+            rows = self._training_examples_iterator(
+                connection,
+                task_key=task_key,
+                corrected_only=corrected_only,
+                limit=limit,
+                max_examples=max_examples,
+                max_bytes=max_bytes,
+                max_row_bytes=max_row_bytes,
+            )
+            return usage, rows
+        except BaseException:
+            connection.rollback()
+            connection.close()
+            raise
+
+    def iter_training_examples(
+        self,
+        *,
+        task_key: str | None = None,
+        corrected_only: bool = True,
+        limit: int | None = None,
+    ) -> Iterator[dict[str, Any]]:
+        """Stream deterministic examples, preferring the latest correction."""
+
+        _validate_training_example_limits(limit=limit)
+        connection = self._open_connection()
+        return self._training_examples_iterator(
+            connection,
+            task_key=task_key,
+            corrected_only=corrected_only,
+            limit=limit,
+        )
+
+    def _training_examples_usage(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        task_key: str | None,
+        corrected_only: bool,
+    ) -> dict[str, int]:
+        row = connection.execute(
+            f"""
             SELECT
-                e.id AS event_id,
+                COUNT(*) AS examples,
+                COALESCE(SUM({_TRAINING_SOURCE_BYTES_SQL}), 0) AS bytes,
+                COALESCE(MAX({_TRAINING_SOURCE_BYTES_SQL}), 0) AS max_row_bytes
+            {_TRAINING_EXAMPLES_FROM_SQL}
+            """,
+            (task_key, task_key, int(corrected_only)),
+        ).fetchone()
+        return {
+            "examples": int(row["examples"]),
+            "bytes": int(row["bytes"]),
+            "max_row_bytes": int(row["max_row_bytes"]),
+        }
+
+    def _training_examples_iterator(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        task_key: str | None,
+        corrected_only: bool,
+        limit: int | None,
+        max_examples: int | None = None,
+        max_bytes: int | None = None,
+        max_row_bytes: int | None = None,
+    ) -> Iterator[dict[str, Any]]:
+        query = f"""
+            SELECT
                 e.input_text,
                 e.metadata_json,
                 p.id AS prediction_id,
                 p.task_key,
-                p.output_json,
+                COALESCE(c.corrected_json, p.output_json) AS selected_output_json,
                 p.model,
-                p.created_at,
-                c.id AS correction_id,
-                c.corrected_json,
-                c.note AS correction_note
-            FROM predictions AS p
-            JOIN events AS e ON e.id = p.event_id
-            LEFT JOIN corrections AS c ON c.id = (
-                SELECT c2.id
-                FROM corrections AS c2
-                WHERE c2.prediction_id = p.id
-                ORDER BY c2.created_at DESC, c2.rowid DESC
-                LIMIT 1
-            )
-            WHERE (? IS NULL OR p.task_key = ?)
-              AND (? = 0 OR c.id IS NOT NULL)
+                c.id IS NOT NULL AS corrected,
+                c.note AS correction_note,
+                {_TRAINING_SOURCE_BYTES_SQL} AS source_row_bytes
+            {_TRAINING_EXAMPLES_FROM_SQL}
             ORDER BY p.created_at ASC, p.rowid ASC
         """
         params: list[Any] = [task_key, task_key, int(corrected_only)]
         if limit is not None:
             query += " LIMIT ?"
             params.append(limit)
-        with self._connect() as connection:
-            rows = connection.execute(query, params).fetchall()
-        examples: list[dict[str, Any]] = []
-        for row in rows:
-            corrected = row["corrected_json"] is not None
-            output_json = row["corrected_json"] if corrected else row["output_json"]
-            examples.append(
-                {
-                    "dataset_format_version": DATASET_FORMAT_VERSION,
-                    "task": row["task_key"],
-                    "input": row["input_text"],
-                    "output": _load_object(output_json),
-                    "metadata": _load_object(row["metadata_json"]),
-                    "corrected": corrected,
-                    "note": row["correction_note"],
-                    "prediction_id": row["prediction_id"],
-                    "model": row["model"],
-                }
-            )
-        return examples
+
+        def rows() -> Iterator[dict[str, Any]]:
+            observed_examples = 0
+            observed_bytes = 0
+            cursor: sqlite3.Cursor | None = None
+            try:
+                cursor = connection.execute(query, params)
+                for row in cursor:
+                    observed_examples += 1
+                    row_bytes = int(row["source_row_bytes"])
+                    observed_bytes += row_bytes
+                    if (
+                        (max_examples is not None and observed_examples > max_examples)
+                        or (max_bytes is not None and observed_bytes > max_bytes)
+                        or (max_row_bytes is not None and row_bytes > max_row_bytes)
+                    ):
+                        raise RuntimeError(
+                            "training example snapshot exceeded its preflight limits"
+                        )
+                    yield {
+                        "dataset_format_version": DATASET_FORMAT_VERSION,
+                        "task": row["task_key"],
+                        "input": row["input_text"],
+                        "output": _load_object(row["selected_output_json"]),
+                        "metadata": _load_object(row["metadata_json"]),
+                        "corrected": bool(row["corrected"]),
+                        "note": row["correction_note"],
+                        "prediction_id": row["prediction_id"],
+                        "model": row["model"],
+                    }
+            finally:
+                if cursor is not None:
+                    cursor.close()
+                connection.rollback()
+                connection.close()
+
+        return rows()
 
     def stats(self) -> dict[str, Any]:
         with self._connect() as connection:
@@ -406,11 +555,7 @@ class BrainStore:
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
-        connection = sqlite3.connect(self.path, timeout=5.0)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA busy_timeout = 5000")
-        connection.execute("PRAGMA journal_mode = WAL")
+        connection = self._open_connection()
         try:
             yield connection
             connection.commit()
@@ -419,6 +564,36 @@ class BrainStore:
             raise
         finally:
             connection.close()
+
+    def _open_connection(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(self.path, timeout=5.0)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("PRAGMA busy_timeout = 5000")
+        connection.execute("PRAGMA journal_mode = WAL")
+        return connection
+
+
+def _validate_training_example_limits(
+    *,
+    limit: int | None,
+    max_examples: int | None = None,
+    max_bytes: int | None = None,
+    max_row_bytes: int | None = None,
+) -> None:
+    values = {
+        "limit": limit,
+        "max_examples": max_examples,
+        "max_bytes": max_bytes,
+        "max_row_bytes": max_row_bytes,
+    }
+    for name, value in values.items():
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 2**63 - 1:
+            raise ValueError(f"{name} must be a positive integer")
+    if limit is not None and limit > 1_000_000:
+        raise ValueError("limit must be between 1 and 1000000")
 
 
 def _new_id(prefix: str) -> str:

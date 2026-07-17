@@ -26,6 +26,7 @@ from auxiliary_brain.llama_server import (
     LlamaServerError,
     LlamaServerStateError,
     build_server_command,
+    get_llama_server_status,
     get_release_asset,
     install_llama_cpp,
     resolve_data_root,
@@ -107,6 +108,102 @@ def test_build_server_command_keeps_extra_arguments_as_separate_values() -> None
     ]
 
 
+def test_build_server_command_uses_pinned_local_model_and_lora_files(tmp_path: Path) -> None:
+    model_path = tmp_path / "base.gguf"
+    adapter_path = tmp_path / "candidate.gguf"
+    model_payload = b"small pinned base model"
+    adapter_payload = b"small pinned adapter"
+    model_path.write_bytes(model_payload)
+    adapter_path.write_bytes(adapter_payload)
+
+    command = build_server_command(
+        LlamaExecutable("llama-server", "llama-server"),
+        model="LiquidAI/LFM2.5-230M",
+        model_path=model_path,
+        model_sha256=hashlib.sha256(model_payload).hexdigest().upper(),
+        lora_adapter_path=adapter_path,
+        lora_adapter_sha256=hashlib.sha256(adapter_payload).hexdigest(),
+        lora_init_without_apply=True,
+        extra_args=("--threads", "2"),
+    )
+
+    assert command == [
+        "llama-server",
+        "-m",
+        str(model_path.resolve()),
+        "--alias",
+        "LiquidAI/LFM2.5-230M",
+        "--host",
+        DEFAULT_HOST,
+        "--port",
+        str(DEFAULT_PORT),
+        "--lora",
+        str(adapter_path.resolve()),
+        "--lora-init-without-apply",
+        "--threads",
+        "2",
+    ]
+
+
+def test_pinned_gguf_rejects_relative_missing_non_file_and_wrong_suffix(
+    tmp_path: Path,
+) -> None:
+    executable = LlamaExecutable("llama-server", "llama-server")
+    digest = "0" * 64
+    directory = tmp_path / "directory.gguf"
+    directory.mkdir()
+    wrong_suffix = tmp_path / "adapter.bin"
+    wrong_suffix.write_bytes(b"adapter")
+
+    with pytest.raises(ValueError, match="must be absolute"):
+        build_server_command(
+            executable,
+            lora_adapter_path=Path("relative.gguf"),
+            lora_adapter_sha256=digest,
+        )
+    with pytest.raises(ValueError, match="does not exist"):
+        build_server_command(
+            executable,
+            lora_adapter_path=tmp_path / "missing.gguf",
+            lora_adapter_sha256=digest,
+        )
+    with pytest.raises(ValueError, match="regular file"):
+        build_server_command(
+            executable,
+            lora_adapter_path=directory,
+            lora_adapter_sha256=digest,
+        )
+    with pytest.raises(ValueError, match=r"\.gguf file"):
+        build_server_command(
+            executable,
+            lora_adapter_path=wrong_suffix,
+            lora_adapter_sha256=digest,
+        )
+
+
+def test_pinned_gguf_requires_a_valid_matching_sha256(tmp_path: Path) -> None:
+    executable = LlamaExecutable("llama-server", "llama-server")
+    model_path = tmp_path / "base.gguf"
+    model_path.write_bytes(b"base model")
+
+    with pytest.raises(ValueError, match="provided together"):
+        build_server_command(executable, model_path=model_path)
+    with pytest.raises(ValueError, match="64-character SHA256"):
+        build_server_command(
+            executable,
+            model_path=model_path,
+            model_sha256="not-a-digest",
+        )
+    with pytest.raises(ValueError, match="SHA256 mismatch"):
+        build_server_command(
+            executable,
+            model_path=model_path,
+            model_sha256="0" * 64,
+        )
+    with pytest.raises(ValueError, match="requires a LoRA adapter"):
+        build_server_command(executable, lora_init_without_apply=True)
+
+
 @pytest.mark.parametrize(
     "extra_args",
     [
@@ -115,6 +212,11 @@ def test_build_server_command_keeps_extra_arguments_as_separate_values() -> None
         ("--port", "9999"),
         ("--port=9999",),
         ("-hf", "some/other-model"),
+        ("--lora", "/tmp/override.gguf"),
+        ("--lora=/tmp/override.gguf",),
+        ("--lora-scaled", "/tmp/override.gguf", "0.5"),
+        ("--lora-init-without-apply",),
+        ("--lora-future-option=true",),
     ],
 )
 def test_build_server_command_rejects_extra_arguments_that_override_safety_settings(
@@ -357,6 +459,62 @@ def test_tar_archive_rejects_hardlinks(tmp_path: Path) -> None:
         llama_server._safe_extract_archive(archive_path, archive_path.name, destination)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="creating symlinks needs Windows Developer Mode")
+def test_runtime_manifest_records_and_detects_safe_symlink_replacement(tmp_path: Path) -> None:
+    root = tmp_path / "runtime"
+    library = root / "lib" / "libllama.so.1"
+    library.parent.mkdir(parents=True)
+    library.write_bytes(b"library one")
+    replacement = library.with_name("libllama.so.2")
+    replacement.write_bytes(b"library two")
+    link = library.with_name("libllama.so")
+    link.symlink_to(library.name)
+
+    before = llama_server._artifact_tree_manifest(root)
+
+    assert before["lib/libllama.so"] == {
+        "type": "symlink",
+        "target": "libllama.so.1",
+    }
+    link.unlink()
+    link.symlink_to(replacement.name)
+    assert llama_server._artifact_tree_manifest(root) != before
+
+
+@pytest.mark.skipif(os.name == "nt", reason="creating symlinks needs Windows Developer Mode")
+def test_runtime_manifest_rejects_escape_and_verifier_handles_link_loop(tmp_path: Path) -> None:
+    root = tmp_path / "runtime"
+    root.mkdir()
+    outside = tmp_path / "outside.so"
+    outside.write_bytes(b"outside")
+    link = root / "libllama.so"
+    link.symlink_to(outside)
+
+    with pytest.raises(OSError, match="installation root"):
+        llama_server._artifact_tree_manifest(root)
+
+    link.unlink()
+    link.symlink_to(link.name)
+    executable = root / "llama-server"
+    executable.write_bytes(b"server")
+    asset = LlamaReleaseAsset("llama-test.tar.gz", "a" * 64, 1)
+    (root / "install.json").write_text(
+        json.dumps(
+            {
+                "release": llama_server.LLAMA_CPP_RELEASE,
+                "asset": asset.name,
+                "sha256": asset.sha256,
+                "executable": executable.name,
+                "executable_sha256": hashlib.sha256(b"server").hexdigest(),
+                "files": {"placeholder": {}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert llama_server._verified_installed_executable(root, asset) is None
+
+
 def test_start_auto_installs_then_spawns_an_argv_only_detached_process(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -395,6 +553,9 @@ def test_start_auto_installs_then_spawns_an_argv_only_detached_process(
     monkeypatch.setenv("LLAMA_ARG_HOST", "0.0.0.0")
     monkeypatch.setenv("LLAMA_ARG_PORT", "9999")
     monkeypatch.setenv("LLAMA_ARG_MODEL", "evil/model")
+    monkeypatch.setenv("OPENAI_API_KEY", "must-not-reach-llama")
+    monkeypatch.setenv("GH_TOKEN", "must-not-reach-llama")
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "must-not-reach-llama")
 
     status = start_llama_server(
         hermes_home=tmp_path,
@@ -423,6 +584,9 @@ def test_start_auto_installs_then_spawns_an_argv_only_detached_process(
     assert "LLAMA_ARG_HOST" not in options["env"]
     assert "LLAMA_ARG_PORT" not in options["env"]
     assert "LLAMA_ARG_MODEL" not in options["env"]
+    assert "OPENAI_API_KEY" not in options["env"]
+    assert "GH_TOKEN" not in options["env"]
+    assert "SLACK_BOT_TOKEN" not in options["env"]
     assert options["env"]["LLAMA_CACHE"] == str(resolve_data_root(tmp_path) / "cache")
     if os.name == "nt":
         expected_flags = (
@@ -438,6 +602,78 @@ def test_start_auto_installs_then_spawns_an_argv_only_detached_process(
     assert status.ready is True
     assert status.identity_verified is True
     assert status.base_url == "http://127.0.0.1:8080/v1"
+
+
+def test_start_persists_pinned_model_and_lora_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable_path = tmp_path / ("llama-server.exe" if os.name == "nt" else "llama-server")
+    executable_path.write_bytes(b"fake executable")
+    executable = LlamaExecutable(str(executable_path.resolve()), "llama-server")
+    model_path = tmp_path / "base.gguf"
+    adapter_path = tmp_path / "candidate.gguf"
+    model_path.write_bytes(b"pinned model")
+    adapter_path.write_bytes(b"pinned adapter")
+    model_sha256 = hashlib.sha256(model_path.read_bytes()).hexdigest()
+    adapter_sha256 = hashlib.sha256(adapter_path.read_bytes()).hexdigest()
+
+    class FakeProcess:
+        pid = 4242
+
+        def poll(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        llama_server,
+        "find_llama_executable",
+        lambda *_args, **_kwargs: executable,
+    )
+    monkeypatch.setattr(llama_server, "_port_is_open", lambda *_args: False)
+    monkeypatch.setattr(llama_server.subprocess, "Popen", lambda *_args, **_kwargs: FakeProcess())
+    monkeypatch.setattr(llama_server.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(llama_server, "_pid_alive", lambda pid: pid == 4242)
+    monkeypatch.setattr(llama_server, "_process_image_path", lambda _pid: str(executable_path))
+    monkeypatch.setattr(llama_server, "_endpoint_ready", lambda *_args: True)
+
+    status = start_llama_server(
+        hermes_home=tmp_path,
+        model="LiquidAI/LFM2.5-230M",
+        model_path=model_path,
+        model_sha256=model_sha256,
+        lora_adapter_path=adapter_path,
+        lora_adapter_sha256=adapter_sha256,
+        lora_init_without_apply=True,
+    )
+
+    assert status.model == "LiquidAI/LFM2.5-230M"
+    assert status.model_path == str(model_path.resolve())
+    assert status.model_sha256 == model_sha256
+    assert status.lora_adapter_path == str(adapter_path.resolve())
+    assert status.lora_adapter_sha256 == adapter_sha256
+    assert status.command == (
+        str(executable_path.resolve()),
+        "-m",
+        str(model_path.resolve()),
+        "--alias",
+        "LiquidAI/LFM2.5-230M",
+        "--host",
+        DEFAULT_HOST,
+        "--port",
+        str(DEFAULT_PORT),
+        "--lora",
+        str(adapter_path.resolve()),
+        "--lora-init-without-apply",
+    )
+    persisted = json.loads(
+        (resolve_data_root(tmp_path) / llama_server.STATE_FILENAME).read_text(encoding="utf-8")
+    )
+    assert persisted["model_path"] == status.model_path
+    assert persisted["model_sha256"] == status.model_sha256
+    assert persisted["lora_adapter_path"] == status.lora_adapter_path
+    assert persisted["lora_adapter_sha256"] == status.lora_adapter_sha256
+    reread = get_llama_server_status(hermes_home=tmp_path)
+    assert reread.as_dict() == status.as_dict()
 
 
 def test_start_refuses_an_occupied_port_before_spawning(
@@ -480,6 +716,23 @@ def _write_server_state(home: Path, executable: Path, *, pid: int = 4242) -> Pat
         encoding="utf-8",
     )
     return state_path
+
+
+def test_status_reads_legacy_state_without_artifact_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable = tmp_path / "llama-server"
+    executable.write_bytes(b"old process image")
+    _write_server_state(tmp_path, executable)
+    monkeypatch.setattr(llama_server, "_pid_alive", lambda _pid: False)
+
+    status = get_llama_server_status(hermes_home=tmp_path)
+
+    assert status.model_path is None
+    assert status.model_sha256 is None
+    assert status.lora_adapter_path is None
+    assert status.lora_adapter_sha256 is None
 
 
 def test_stop_refuses_to_signal_a_reused_pid(

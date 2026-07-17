@@ -51,7 +51,6 @@ def _load_real_plugin(
         "plugin.yaml",
         "__init__.py",
         "auxiliary_brain",
-        "SKILL.md",
         "after-install.md",
     ):
         source = source_root / name

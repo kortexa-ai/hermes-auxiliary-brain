@@ -17,6 +17,7 @@ from .llama_server import (
     DEFAULT_PORT,
     LLAMA_CPP_RELEASE,
     LlamaServerError,
+    find_profile_llama_executable,
     get_llama_server_status,
     install_llama_cpp,
     read_llama_server_logs,
@@ -39,6 +40,22 @@ from .runtime import (
     resolve_api_key,
 )
 from .tasks import list_tasks
+from .training import (
+    DEFAULT_EVALUATION_PORT,
+    TrainingError,
+    active_deployment_artifacts,
+    convert_training_run,
+    evaluate_training_run,
+    install_training_environment,
+    prepare_training,
+    promote_training_run,
+    read_training_logs,
+    rollback_training_deployment,
+    run_training,
+    training_status,
+    verify_loaded_adapter,
+)
+from .training_data import TrainingDataError
 
 logger = logging.getLogger(__name__)
 RUNTIME = BrainRuntime()
@@ -129,6 +146,8 @@ def setup_cli(parser: argparse.ArgumentParser) -> None:
         "examples:\n"
         "  hermes brain server start\n"
         "  hermes brain status --json\n"
+        "  hermes brain train status\n"
+        "  hermes brain train --help\n"
         '  hermes brain run progress_checkin "Finished a planned session."'
     )
     sub = parser.add_subparsers(dest="brain_command")
@@ -189,6 +208,106 @@ def setup_cli(parser: argparse.ArgumentParser) -> None:
     server_logs.add_argument("--lines", type=int, default=100)
     server_stop = server_sub.add_parser("stop", help="stop only the verified managed process")
     server_stop.add_argument("--timeout", type=float, default=5.0)
+
+    train = sub.add_parser(
+        "train",
+        help="prepare, train, evaluate, and deploy a LoRA adapter",
+        description=(
+            "Build an explicitly reviewed local LoRA through immutable bundle, "
+            "isolated training, conversion, evaluation, and promotion stages."
+        ),
+        epilog=(
+            "start with `hermes brain train status`; see docs/training.md for "
+            "hardware, privacy, smoke-test, and recovery guidance"
+        ),
+    )
+    train_sub = train.add_subparsers(dest="train_command")
+    train_status_parser = train_sub.add_parser(
+        "status", help="show data, environment, run, and deployment readiness"
+    )
+    train_status_parser.add_argument("--json", action="store_true")
+    train_prepare = train_sub.add_parser(
+        "prepare", help="lint corrected examples and create an immutable bundle"
+    )
+    train_prepare.add_argument(
+        "--task",
+        choices=[task.key for task in list_tasks()],
+        help="prepare one task only (experimental unless every task is represented)",
+    )
+    train_prepare.add_argument("--seed", type=int, default=42, help="split seed (default: 42)")
+    train_prepare.add_argument(
+        "--holdout-percent", type=int, default=20, help="holdout percentage (default: 20)"
+    )
+    train_prepare.add_argument(
+        "--min-examples", type=int, default=20, help="minimum unique examples (default: 20)"
+    )
+    train_prepare.add_argument(
+        "--min-train", type=int, default=16, help="minimum unique train rows (default: 16)"
+    )
+    train_prepare.add_argument(
+        "--min-holdout", type=int, default=4, help="minimum unique holdout rows (default: 4)"
+    )
+    train_prepare.add_argument(
+        "--acknowledge-unattributed-gateway",
+        action="store_true",
+        help="confirm explicit review of gateway-slash rows without sender attribution",
+    )
+    train_prepare.add_argument(
+        "--allow-small",
+        action="store_true",
+        help="create an experimental non-promotable bundle below quality thresholds",
+    )
+    train_prepare.add_argument("--json", action="store_true", help="print machine-readable JSON")
+    train_install = train_sub.add_parser(
+        "install", help="download large isolated ML/converter environments profile-locally"
+    )
+    train_install.add_argument(
+        "component", nargs="?", choices=("all", "trainer", "converter"), default="all"
+    )
+    train_install.add_argument("--force", action="store_true")
+    train_install.add_argument("--python", default=None, help="Python executable for the venv")
+    train_run = train_sub.add_parser("run", help="train one PEFT LoRA adapter")
+    train_run.add_argument("bundle", nargs="?", default=None)
+    train_run.add_argument("--smoke", action="store_true", help="two-step non-promotable proof")
+    train_run.add_argument(
+        "--allow-cpu",
+        action="store_true",
+        help="allow the slow CPU fallback when CUDA/MPS is unavailable",
+    )
+    train_run.add_argument("--seed", type=int, default=42)
+    train_run.add_argument(
+        "--max-length",
+        type=int,
+        default=512,
+        help="token window (default: 512; too-small values fail before training)",
+    )
+    train_run.add_argument("--epochs", type=float, default=3.0)
+    train_run.add_argument("--max-steps", type=int, default=None)
+    train_run.add_argument("--learning-rate", type=float, default=0.0001)
+    train_run.add_argument("--gradient-accumulation", type=int, default=4)
+    train_run.add_argument("--timeout", type=float, default=None)
+    train_convert = train_sub.add_parser(
+        "convert", help="convert a trained PEFT adapter to llama.cpp GGUF"
+    )
+    train_convert.add_argument("run", nargs="?", default=None)
+    train_convert.add_argument("--timeout", type=float, default=900.0)
+    train_evaluate = train_sub.add_parser(
+        "evaluate", help="compare exact Q4 baseline and candidate on holdout rows"
+    )
+    train_evaluate.add_argument("run", nargs="?", default=None)
+    train_evaluate.add_argument("--port", type=int, default=DEFAULT_EVALUATION_PORT)
+    train_evaluate.add_argument("--startup-timeout", type=float, default=600.0)
+    train_promote = train_sub.add_parser(
+        "promote", help="activate one passing candidate and restart the managed server"
+    )
+    train_promote.add_argument("run", nargs="?", default=None)
+    train_sub.add_parser("rollback", help="restore the previous adapter or unchanged base")
+    train_logs = train_sub.add_parser("logs", help="show a bounded training-stage log tail")
+    train_logs.add_argument("run", nargs="?", default=None)
+    train_logs.add_argument(
+        "--stage", choices=("trainer", "converter", "evaluation_server"), default="trainer"
+    )
+    train_logs.add_argument("--lines", type=int, default=100)
 
     gateway = sub.add_parser("gateway", help="manage the opt-in /brain messaging command")
     gateway_sub = gateway.add_subparsers(dest="gateway_command")
@@ -265,6 +384,8 @@ def brain_command(args: argparse.Namespace) -> int:
             return 0
         if command == "server":
             return _cmd_server(args)
+        if command == "train":
+            return _cmd_train(args)
         if command == "gateway":
             return _cmd_gateway(args)
         if command == "tasks":
@@ -306,7 +427,14 @@ def brain_command(args: argparse.Namespace) -> int:
             report = RUNTIME.evaluate(task_key=args.task, limit=args.limit)
             print(json.dumps(report, indent=2, ensure_ascii=False, sort_keys=True))
             return 0 if not report["failures"] else 1
-    except (BrainRuntimeError, LlamaServerError, OSError, ValueError) as exc:
+    except (
+        BrainRuntimeError,
+        LlamaServerError,
+        OSError,
+        TrainingDataError,
+        TrainingError,
+        ValueError,
+    ) as exc:
         print(f"Auxiliary brain: {exc}")
         return 1
 
@@ -316,7 +444,7 @@ def brain_command(args: argparse.Namespace) -> int:
     else:
         print(
             "usage: hermes brain "
-            "{setup,server,gateway,status,doctor,help,tasks,mode,run,correct,export,evaluate}"
+            "{setup,server,train,gateway,status,doctor,help,tasks,mode,run,correct,export,evaluate}"
         )
     return 2
 
@@ -412,6 +540,7 @@ def pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
         session_id = kwargs.get("session_id")
         metadata = {
             "platform": kwargs.get("platform"),
+            "sender_id": kwargs.get("sender_id"),
             "turn_id": kwargs.get("turn_id"),
         }
         route = RUNTIME.run(
@@ -537,14 +666,60 @@ def _cmd_server(args: argparse.Namespace) -> int:
         print(f"  executable : {executable.path}")
         return 0
     if action == "start":
-        status = start_llama_server(
-            executable=args.executable,
-            install_if_missing=not args.no_install,
-            model=args.model,
-            host=args.host,
-            port=args.port,
-            wait_ready_seconds=args.wait_seconds,
-        )
+        deployment = active_deployment_artifacts()
+        active_adapter = deployment is not None and deployment["adapter_path"] is not None
+        if active_adapter and args.model != DEFAULT_MODEL:
+            raise BrainRuntimeError(
+                "the promoted adapter is pinned to the default LFM2.5-230M base; "
+                "run `hermes brain train rollback` before selecting another model"
+            )
+        if deployment is not None and not active_adapter and args.model != DEFAULT_MODEL:
+            deployment = None
+        start_options = {
+            "executable": args.executable,
+            "install_if_missing": not args.no_install,
+            "model": args.model,
+            "host": args.host,
+            "port": args.port,
+            "wait_ready_seconds": args.wait_seconds,
+        }
+        if deployment is not None:
+            if args.executable is not None:
+                raise BrainRuntimeError(
+                    "an active training deployment requires the profile-pinned llama.cpp runtime"
+                )
+            if args.no_install:
+                pinned = find_profile_llama_executable()
+            else:
+                pinned = install_llama_cpp()
+            start_options.update(
+                {
+                    "executable": pinned.path,
+                    "install_if_missing": False,
+                    "model_path": deployment["base_model_path"],
+                    "model_sha256": deployment["base_model_sha256"],
+                }
+            )
+            if deployment["adapter_path"] is not None:
+                start_options.update(
+                    {
+                        "lora_adapter_path": deployment["adapter_path"],
+                        "lora_adapter_sha256": deployment["adapter_sha256"],
+                    }
+                )
+        status = start_llama_server(**start_options)
+        if deployment is not None and deployment["adapter_path"] is not None:
+            try:
+                verify_loaded_adapter(
+                    status.port,
+                    Path(deployment["adapter_path"]),
+                    expected_scale=1.0,
+                )
+            except TrainingError:
+                current = get_llama_server_status()
+                if current.running and current.pid == status.pid:
+                    stop_llama_server(timeout_seconds=10.0)
+                raise
         probe = probe_endpoint(status.base_url, timeout=2.0)
         exposed_model = probe.choose_model(args.model, strict=True) if probe.reachable else None
         if exposed_model is None:
@@ -574,6 +749,8 @@ def _cmd_server(args: argparse.Namespace) -> int:
         print(f"  endpoint   : {status.base_url}")
         print(f"  model      : {exposed_model}")
         print(f"  PID        : {status.pid}")
+        if status.lora_adapter_path:
+            print(f"  adapter    : {status.lora_adapter_path}")
         print(f"  log        : {status.log_path}")
         return 0
     if action == "status":
@@ -588,6 +765,111 @@ def _cmd_server(args: argparse.Namespace) -> int:
         print(_format_server_status(status))
         return 0
     raise BrainRuntimeError("choose a server action: install, start, status, logs, or stop")
+
+
+def _cmd_train(args: argparse.Namespace) -> int:
+    action = getattr(args, "train_command", None)
+    if action == "status":
+        report = training_status()
+        print(
+            json.dumps(report, indent=2, ensure_ascii=False, sort_keys=True)
+            if args.json
+            else _format_training_status(report)
+        )
+        return 0
+    if action == "prepare":
+        result = prepare_training(
+            task_key=args.task,
+            seed=args.seed,
+            holdout_percent=args.holdout_percent,
+            min_unique_examples=args.min_examples,
+            min_train_examples=args.min_train,
+            min_holdout_examples=args.min_holdout,
+            acknowledge_unattributed_gateway=args.acknowledge_unattributed_gateway,
+            allow_small=args.allow_small,
+        )
+        if args.json:
+            print(json.dumps(_json_safe(result), indent=2, ensure_ascii=False, sort_keys=True))
+        else:
+            state = "created" if result["created"] else "already exists"
+            promotion = result["manifest"]["promotion"]
+            print(f"Training bundle {state}: {result['path']}")
+            print(
+                "  examples   : "
+                f"{result['manifest']['counts']['train']} train, "
+                f"{result['manifest']['counts']['holdout']} holdout"
+            )
+            print(f"  promotable : {'yes' if promotion['promotable'] else 'no (experimental)'}")
+        return 0
+    if action == "install":
+        result = install_training_environment(
+            args.component,
+            force=args.force,
+            python_executable=args.python,
+        )
+        for component, status in result.items():
+            print(f"{component:10} {'ready' if status['ready'] else 'not ready'}")
+            print(f"  {status['path']}")
+        return 0
+    if action == "run":
+        record = run_training(
+            args.bundle,
+            smoke=args.smoke,
+            allow_cpu=args.allow_cpu,
+            seed=args.seed,
+            max_length=args.max_length,
+            epochs=args.epochs,
+            max_steps=args.max_steps,
+            learning_rate=args.learning_rate,
+            gradient_accumulation_steps=args.gradient_accumulation,
+            timeout_seconds=args.timeout,
+        )
+        print(f"Training complete: {record['run_id']}")
+        print(f"  status     : {record['status']}")
+        print(f"  next       : hermes brain train convert {record['run_id']}")
+        return 0
+    if action == "convert":
+        record = convert_training_run(args.run, timeout_seconds=args.timeout)
+        print(f"Adapter converted: {record['run_id']}")
+        print(f"  next       : hermes brain train evaluate {record['run_id']}")
+        return 0
+    if action == "evaluate":
+        record = evaluate_training_run(
+            args.run,
+            port=args.port,
+            startup_timeout=args.startup_timeout,
+        )
+        evaluation = record["evaluation"]
+        print(f"Candidate evaluated: {record['run_id']}")
+        print(f"  quality    : {'pass' if evaluation['quality_passed'] else 'fail'}")
+        print(
+            f"  promotion  : {'eligible' if evaluation['promotion_eligible'] else 'not eligible'}"
+        )
+        return 0 if evaluation["quality_passed"] else 1
+    if action == "promote":
+        deployment = promote_training_run(args.run)
+        print(f"Promoted adapter: {deployment['active']['run_id']}")
+        print(
+            "  server     : "
+            f"{'restarted' if deployment['managed_server_restarted'] else 'applies on next start'}"
+        )
+        return 0
+    if action == "rollback":
+        deployment = rollback_training_deployment()
+        active = deployment.get("active")
+        print(f"Rolled back to: {active['run_id'] if active else 'unchanged base model'}")
+        print(
+            "  server     : "
+            f"{'restarted' if deployment['managed_server_restarted'] else 'applies on next start'}"
+        )
+        return 0
+    if action == "logs":
+        print(read_training_logs(args.run, stage=args.stage, lines=args.lines))
+        return 0
+    raise BrainRuntimeError(
+        "choose a train action: status, prepare, install, run, convert, evaluate, "
+        "promote, rollback, or logs"
+    )
 
 
 def _parse_json_object(value: str) -> dict[str, Any]:
@@ -762,8 +1044,53 @@ def _format_server_status(status: Any) -> str:
         f"  model      : {status.model}",
         f"  PID        : {status.pid or '-'}",
         f"  executable : {status.executable or '-'}",
+        f"  base file  : {status.model_path or '-'}",
+        f"  adapter    : {status.lora_adapter_path or '-'}",
         f"  log        : {status.log_path}",
     ]
     if status.error:
         lines.append(f"  error      : {status.error}")
     return "\n".join(lines)
+
+
+def _format_training_status(report: dict[str, Any]) -> str:
+    readiness = report["readiness"]
+    counts = readiness["counts"]
+    environments = report["environments"]
+    deployment = report.get("deployment") or {}
+    active = deployment.get("active")
+    latest = report.get("latest_run") or {}
+    lines = [
+        "Hermes Auxiliary Brain training",
+        f"  data       : {report['root']}",
+        f"  corrected  : {counts['corrected']}",
+        f"  eligible   : {counts['eligible']} ({counts['unique_examples']} unique)",
+        f"  split      : {counts['train']} train / {counts['holdout']} holdout",
+        f"  readiness  : {'ready' if readiness['ready'] else 'not ready'}",
+        f"  trainer    : {'ready' if environments['trainer']['ready'] else 'not installed'}",
+        f"  converter  : {'ready' if environments['converter']['ready'] else 'not installed'}",
+        f"  GGUF base  : {'verified' if report['base_model']['gguf_ready'] else 'not downloaded'}",
+        f"  latest run : {latest.get('run_id', '-')} ({latest.get('status', '-')})",
+        f"  active     : {active.get('run_id') if active else 'unchanged base model'}",
+    ]
+    for issue in readiness["errors"]:
+        lines.append(f"  [FAIL] {issue['code']}: {issue['message']}")
+    for issue in readiness["warnings"]:
+        lines.append(f"  [WARN] {issue['code']}: {issue['message']}")
+    if not readiness["ready"]:
+        lines.append("  next       : review corrections, then run hermes brain train prepare")
+    elif not environments["trainer"]["ready"]:
+        lines.append("  next       : hermes brain train install trainer")
+    else:
+        lines.append("  next       : hermes brain train prepare")
+    return "\n".join(lines)
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return value

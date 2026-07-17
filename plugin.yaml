@@ -1,5 +1,5 @@
 name: auxiliary-brain
-version: 0.4.0
+version: 0.5.0
 manifest_version: 1
 description: "A small local-model sidecar for bounded classification, extraction, and reviewable learning."
 author: Kortexa AI

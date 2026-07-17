@@ -12,17 +12,20 @@ def make_source(root: Path) -> Path:
     root.mkdir(parents=True)
     (root / "plugin.yaml").write_text("name: auxiliary-brain\n", encoding="utf-8")
     (root / "__init__.py").write_text("def register(ctx): pass\n", encoding="utf-8")
+    (root / "LICENSE").write_text("Test license\n", encoding="utf-8")
     package = root / "auxiliary_brain"
     package.mkdir()
     (package / "runtime.py").write_text("VALUE = 1\n", encoding="utf-8")
     (package / "__pycache__").mkdir()
     (package / "__pycache__" / "runtime.pyc").write_bytes(b"not really bytecode")
-    (root / "SKILL.md").write_text("# Skill\n", encoding="utf-8")
     dashboard = root / "dashboard"
     dashboard.mkdir()
     (dashboard / "manifest.json").write_text('{"name":"auxiliary-brain"}\n')
     (root / "tests").mkdir()
     (root / "tests" / "should_not_copy.py").write_text("nope = True\n")
+    docs = root / "docs"
+    docs.mkdir()
+    (docs / "training.md").write_text("# Training\n", encoding="utf-8")
     return root
 
 
@@ -58,8 +61,10 @@ def test_copy_runtime_installs_only_runtime_paths(tmp_path) -> None:
 
     assert (destination / "plugin.yaml").is_file()
     assert (destination / "__init__.py").is_file()
+    assert (destination / "LICENSE").read_text(encoding="utf-8") == "Test license\n"
     assert (destination / "auxiliary_brain" / "runtime.py").is_file()
     assert (destination / "dashboard" / "manifest.json").is_file()
+    assert (destination / "docs" / "training.md").is_file()
     assert not (destination / "auxiliary_brain" / "__pycache__").exists()
     assert not (destination / "tests").exists()
 

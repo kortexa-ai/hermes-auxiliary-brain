@@ -24,7 +24,9 @@ or server. The tiny model is a reflex, not the philosopher king. Giving a
 - Can optionally add compact local context to the *current* user turn. It does
   not mutate the system prompt or old conversation history.
 - Stores predictions and human corrections locally in SQLite.
-- Exports reviewed examples for deliberate evaluation and fine-tuning.
+- Builds deterministic train/holdout bundles from reviewed corrections.
+- Trains, converts, evaluates, explicitly promotes, and rolls back a small
+  LFM2 LoRA adapter without adding ML dependencies to Hermes itself.
 - Fails open: if the local server is asleep, ordinary Hermes conversations keep
   working.
 
@@ -368,20 +370,41 @@ The plugin separates **capturing experience** from **changing weights**:
 2. The prediction and task metadata are stored under
    `HERMES_HOME/auxiliary-brain/`.
 3. You inspect it and record a correction when needed.
-4. The plugin exports only reviewable, versioned learning examples.
-5. You fine-tune a candidate model or adapter in an explicit external job.
-6. You evaluate the candidate against held-out examples before changing the
-   model served at the local endpoint.
+4. `train prepare` lints corrected rows and freezes an immutable,
+   content-addressed train/holdout bundle.
+5. An isolated subprocess trains a rank-8 LoRA against the pinned native
+   LFM2.5-230M checkpoint, then the pinned llama.cpp converter creates a GGUF
+   adapter.
+6. The exact Q4 base and candidate adapter are evaluated on a deterministic
+   sample of the frozen holdout (at most 100 rows). Promotion is available only
+   when every candidate answer satisfies its schema and no overall or per-task
+   score regresses.
+7. You explicitly promote the candidate. `rollback` restores the prior
+   verified adapter, or the unchanged base model.
 
-This repository intentionally does not auto-train or auto-promote weights.
-One bad correction should become one fixable row, not a personality transplant.
-An exported dataset may contain private text; inspect and protect it like the
-source material.
+Nothing trains or changes the served adapter automatically. One bad correction
+should become one fixable row, not a personality transplant.
 
-`hermes brain evaluate` is a regression check against corrected rows already
-in the profile database. Those rows are not automatically held out from
-training, so the command is not a promotion gate; manage a separate frozen
-holdout in the external training workflow.
+The normal lifecycle is explicit:
+
+```console
+hermes brain train status
+hermes brain train prepare
+hermes brain train install all
+hermes brain train run
+hermes brain train convert <run-id>
+hermes brain train evaluate <run-id>
+hermes brain train promote <run-id>
+hermes brain train rollback
+```
+
+`hermes brain evaluate` remains the quick diagnostic against corrections in
+the live database. `hermes brain train evaluate` is the reproducible promotion
+gate against a bundle's frozen holdout; they are intentionally different.
+
+For hardware guidance, the non-promotable smoke path, privacy rules, exact
+dependency/model pins, logs, and recovery behavior, read the
+[training guide](docs/training.md).
 
 Corrections reference prediction IDs. When a prediction has several
 corrections, its newest correction wins in the export. Corrected-only export is
@@ -426,6 +449,15 @@ release uses these surfaces instead of a transparent mid-conversation router.
 - Captured inputs, predictions, corrections, and exports can be sensitive.
   They stay outside the replaceable plugin code directory, but they are still
   files on your machine and should inherit appropriate disk protections.
+- Training bundles and run artifacts contain corrected inputs and expected
+  outputs in readable files. The secret lint is a safety net, not a proof that
+  a dataset is anonymous; inspect bundles before training or sharing them.
+- A fine-tuned adapter can memorize examples. Training never uploads datasets
+  or pushes artifacts to a model hub, but dependency and model installation do
+  contact their configured package/model hosts. Do not casually commit or
+  share profile bundles, logs, runs, or adapters.
+- The managed API is keyless loopback in v0.5. Other OS users on a shared host
+  may be able to query it, so do not train private material on a shared machine.
 - Storage is profile-wide, not per gateway user. Every captured direct run,
   including `/brain` and dashboard `/checkin`, plus shadow/assist capture,
   writes into the same profile database. Plugin slash handlers receive no
@@ -488,7 +520,9 @@ only when you mean to.
 
 ## Develop
 
-The runtime has no third-party Python dependency. Tests use `pytest`:
+The normal plugin runtime has no third-party Python dependency. Optional
+training creates separate profile-local environments containing the pinned ML
+stack. Tests use `pytest`:
 
 ```console
 python -m pytest
@@ -501,6 +535,7 @@ decisions and deferred work.
 
 ## License
 
-Plugin code is available under the [MIT License](LICENSE). Models and local
-inference servers have their own licenses; review those before use or
-distribution.
+Plugin code is available under the [MIT License](LICENSE). LFM weights and
+derived adapters use Liquid AI's LFM Open License v1.0; llama.cpp is MIT, and
+Python dependencies retain their own licenses. Review those terms before use,
+commercial use, or distribution.

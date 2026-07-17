@@ -51,6 +51,12 @@ Try `hermes brain status`, `hermes brain doctor`, or
 hermes brain run progress_checkin "Completed a planned session."
 ```
 
+When you have reviewed corrections, inspect learning readiness with
+`hermes brain train status`. Training is optional, explicit, and installs its
+heavy ML dependencies into profile-local environments only when you run
+`hermes brain train install`. Read `docs/training.md` in the installed plugin
+directory before training or sharing an adapter.
+
 Mutable state is stored under `HERMES_HOME/auxiliary-brain/`, outside this
 replaceable plugin directory. Updating the plugin does not erase its little
 notebook.

@@ -53,6 +53,7 @@ def server_status(
     *,
     running: bool = True,
     ready: bool = True,
+    model: str = "LiquidAI/LFM2.5-230M-GGUF:Q4_K_M",
 ) -> LlamaServerStatus:
     return LlamaServerStatus(
         running=running,
@@ -61,7 +62,7 @@ def server_status(
         pid=4242 if running else None,
         host="127.0.0.1",
         port=8080,
-        model="LiquidAI/LFM2.5-230M-GGUF:Q4_K_M",
+        model=model,
         executable=str(tmp_path / "llama-server") if running else None,
         started_at="2026-07-16T12:00:00+00:00" if running else None,
         log_path=tmp_path / "llama-server.log",
@@ -249,6 +250,122 @@ def test_server_start_model_mismatch_leaves_configuration_unchanged(
     assert str(status.log_path) in output
 
 
+def test_server_start_keeps_stable_model_alias_for_promoted_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    status = server_status(tmp_path)
+    base = tmp_path / "base.gguf"
+    adapter = tmp_path / "adapter.gguf"
+    deployment = {
+        "base_model_path": str(base),
+        "base_model_sha256": "1" * 64,
+        "adapter_path": str(adapter),
+        "adapter_sha256": "2" * 64,
+    }
+    observed: dict[str, Any] = {}
+
+    class ManagedRuntime:
+        def config(self) -> BrainConfig:
+            return BrainConfig()
+
+        def save_configuration(self, **kwargs: Any) -> BrainConfig:
+            observed["saved"] = kwargs
+            return BrainConfig(**kwargs)
+
+    monkeypatch.setattr(plugin, "RUNTIME", ManagedRuntime())
+    monkeypatch.setattr(plugin, "active_deployment_artifacts", lambda: deployment)
+    monkeypatch.setattr(
+        plugin,
+        "install_llama_cpp",
+        lambda: SimpleNamespace(path="pinned-llama-server"),
+    )
+    monkeypatch.setattr(plugin, "verify_loaded_adapter", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        plugin,
+        "start_llama_server",
+        lambda **kwargs: observed.setdefault("start", kwargs) and status,
+    )
+    monkeypatch.setattr(
+        plugin,
+        "probe_endpoint",
+        lambda *_args, **_kwargs: EndpointProbe(
+            status.base_url,
+            reachable=True,
+            models=(status.model,),
+        ),
+    )
+    parser = argparse.ArgumentParser()
+    plugin.setup_cli(parser)
+
+    assert plugin.brain_command(parser.parse_args(["server", "start"])) == 0
+    assert observed["start"]["executable"] == "pinned-llama-server"
+    assert observed["start"]["install_if_missing"] is False
+    assert observed["start"]["model_path"] == str(base)
+    assert observed["start"]["lora_adapter_path"] == str(adapter)
+    assert observed["saved"]["model"] == status.model
+
+
+def test_server_start_allows_custom_model_after_rollback_to_base(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    custom_model = "local/custom-model"
+    status = server_status(tmp_path, model=custom_model)
+    deployment = {
+        "base_model_path": str(tmp_path / "base.gguf"),
+        "base_model_sha256": "1" * 64,
+        "adapter_path": None,
+        "adapter_sha256": None,
+    }
+    observed: dict[str, Any] = {}
+
+    class ManagedRuntime:
+        def config(self) -> BrainConfig:
+            return BrainConfig()
+
+        def save_configuration(self, **kwargs: Any) -> BrainConfig:
+            observed["saved"] = kwargs
+            return BrainConfig(**kwargs)
+
+    monkeypatch.setattr(plugin, "RUNTIME", ManagedRuntime())
+    monkeypatch.setattr(plugin, "active_deployment_artifacts", lambda: deployment)
+    monkeypatch.setattr(
+        plugin,
+        "install_llama_cpp",
+        lambda: pytest.fail("base-only rollback must not force the pinned runtime"),
+    )
+    monkeypatch.setattr(
+        plugin,
+        "start_llama_server",
+        lambda **kwargs: observed.setdefault("start", kwargs) and status,
+    )
+    monkeypatch.setattr(
+        plugin,
+        "probe_endpoint",
+        lambda *_args, **_kwargs: EndpointProbe(
+            status.base_url,
+            reachable=True,
+            models=(custom_model,),
+        ),
+    )
+    parser = argparse.ArgumentParser()
+    plugin.setup_cli(parser)
+
+    assert (
+        plugin.brain_command(parser.parse_args(["server", "start", "--model", custom_model])) == 0
+    )
+    assert observed["start"] == {
+        "executable": None,
+        "install_if_missing": True,
+        "model": custom_model,
+        "host": "127.0.0.1",
+        "port": 8080,
+        "wait_ready_seconds": 600.0,
+    }
+    assert observed["saved"]["model"] == custom_model
+
+
 def test_server_manager_errors_are_safe_cli_failures(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -420,6 +537,7 @@ def test_pre_llm_shadow_records_route_but_injects_nothing(
         user_message="extract this",
         session_id="session-1",
         platform="telegram",
+        sender_id="telegram-user-1",
         turn_id="turn-1",
     )
 
@@ -430,7 +548,11 @@ def test_pre_llm_shadow_records_route_but_injects_nothing(
             "text": "extract this",
             "source": "pre_llm_call",
             "session_id": "session-1",
-            "metadata": {"platform": "telegram", "turn_id": "turn-1"},
+            "metadata": {
+                "platform": "telegram",
+                "sender_id": "telegram-user-1",
+                "turn_id": "turn-1",
+            },
         }
     ]
 
@@ -480,7 +602,7 @@ def test_pre_llm_assist_injects_compact_untrusted_extraction(
         "text": "extract this",
         "source": "pre_llm_call_assist",
         "session_id": "42",
-        "metadata": {"platform": "cli", "turn_id": "turn-2"},
+        "metadata": {"platform": "cli", "sender_id": None, "turn_id": "turn-2"},
     }
 
 

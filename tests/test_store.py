@@ -146,6 +146,102 @@ def test_uncorrected_examples_can_be_requested(tmp_path) -> None:
     assert examples[0]["output"] == {"summary": "Initial", "confidence": 0.4}
 
 
+def test_bounded_training_snapshot_excludes_row_inserted_after_preflight(tmp_path) -> None:
+    store, _, prediction_id = populated_store(tmp_path)
+    store.record_correction(prediction_id=prediction_id, corrected={"summary": "Reviewed"})
+    usage, snapshot = store.bounded_training_examples(
+        max_examples=1,
+        max_bytes=4_096,
+        max_row_bytes=1_024,
+    )
+
+    event = store.record_event(
+        kind="explicit",
+        task_key="generic_extract",
+        input_text="x" * 2_048,
+        metadata={"source": "test"},
+        event_id="evt_oversized",
+    )
+    prediction = store.record_prediction(
+        event_id=event.id,
+        task_key="generic_extract",
+        output={"summary": "Initial oversized row"},
+        prediction_id="pred_oversized",
+    )
+    store.record_correction(
+        prediction_id=prediction.id,
+        corrected={"summary": "Valid reviewed row"},
+    )
+
+    assert usage["examples"] == 1
+    assert [example["prediction_id"] for example in snapshot] == [prediction_id]
+
+    next_usage, rejected = store.bounded_training_examples(
+        max_examples=1,
+        max_bytes=4_096,
+        max_row_bytes=1_024,
+    )
+    assert next_usage["examples"] == 2
+    assert next_usage["max_row_bytes"] > 1_024
+    assert list(rejected) == []
+
+
+def test_bounded_training_counts_latest_correction_not_huge_original_output(tmp_path) -> None:
+    store, _, prediction_id = populated_store(tmp_path)
+    huge_original = {"summary": "x" * (2 * 1024 * 1024)}
+    with sqlite3.connect(store.path) as connection:
+        connection.execute(
+            "UPDATE predictions SET output_json = ? WHERE id = ?",
+            (
+                json.dumps(huge_original, ensure_ascii=False, separators=(",", ":")),
+                prediction_id,
+            ),
+        )
+    correction = {"summary": "Tiny reviewed answer"}
+    note = "latest human answer"
+    store.record_correction(
+        prediction_id=prediction_id,
+        corrected=correction,
+        note=note,
+    )
+
+    usage, snapshot = store.bounded_training_examples(
+        max_examples=1,
+        max_bytes=1_024,
+        max_row_bytes=1_024,
+    )
+    examples = list(snapshot)
+    expected_bytes = sum(
+        len(value.encode("utf-8"))
+        for value in (
+            prediction_id,
+            "generic_extract",
+            "Capture this task",
+            json.dumps(
+                {"source": "test"},
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            json.dumps(
+                correction,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            note,
+            "tiny",
+        )
+    )
+
+    assert usage == {
+        "examples": 1,
+        "bytes": expected_bytes,
+        "max_row_bytes": expected_bytes,
+    }
+    assert examples[0]["output"] == correction
+
+
 def test_recent_predictions_filters_by_task_and_validates_limit(tmp_path) -> None:
     store, _, _ = populated_store(tmp_path)
     other_event = store.record_event(kind="test", input_text="other")

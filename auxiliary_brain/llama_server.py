@@ -49,6 +49,9 @@ STATE_FORMAT_VERSION = 1
 MAX_ARCHIVE_BYTES = 256 * 1024 * 1024
 MAX_EXTRACTED_BYTES = 1024 * 1024 * 1024
 MAX_LOG_TAIL_BYTES = 1024 * 1024
+MAX_STATE_BYTES = 64 * 1024
+MAX_INSTALL_MANIFEST_BYTES = 2 * 1024 * 1024
+MAX_INSTALL_FILES = 10_000
 
 
 class LlamaServerError(RuntimeError):
@@ -117,6 +120,10 @@ class LlamaServerStatus:
     state_path: Path
     command: tuple[str, ...] = ()
     error: str | None = None
+    lora_adapter_path: str | None = None
+    lora_adapter_sha256: str | None = None
+    model_path: str | None = None
+    model_sha256: str | None = None
 
     @property
     def base_url(self) -> str:
@@ -179,6 +186,11 @@ _PROTECTED_SERVER_OPTIONS = frozenset(
         "--host",
         "--port",
         "-p",
+        "--alias",
+        "-a",
+        "--lora",
+        "--lora-scaled",
+        "--lora-init-without-apply",
     }
 )
 _PROTECTED_ENVIRONMENT = frozenset(
@@ -188,6 +200,35 @@ _PROTECTED_ENVIRONMENT = frozenset(
         "LLAMA_ARG_MODEL_URL",
         "LLAMA_ARG_HOST",
         "LLAMA_ARG_PORT",
+        "LLAMA_ARG_ALIAS",
+        "LLAMA_ARG_LORA",
+        "LLAMA_ARG_LORA_SCALED",
+        "LLAMA_ARG_LORA_INIT_WITHOUT_APPLY",
+    }
+)
+_SERVER_ENVIRONMENT_ALLOWLIST = frozenset(
+    {
+        "APPDATA",
+        "COMSPEC",
+        "CUDA_VISIBLE_DEVICES",
+        "HOME",
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "LANG",
+        "LC_ALL",
+        "LOCALAPPDATA",
+        "NO_PROXY",
+        "PATH",
+        "PATHEXT",
+        "PROGRAMDATA",
+        "SSL_CERT_DIR",
+        "SSL_CERT_FILE",
+        "SYSTEMROOT",
+        "TEMP",
+        "TMP",
+        "TMPDIR",
+        "USERPROFILE",
+        "WINDIR",
     }
 )
 _ALLOWED_DOWNLOAD_HOSTS = frozenset(
@@ -268,13 +309,33 @@ def find_llama_executable(
             return _describe_executable(Path(candidate))
 
     install_root = resolve_data_root(hermes_home) / INSTALL_DIRECTORY / LLAMA_CPP_RELEASE
-    candidate = _find_installed_executable(install_root)
+    asset = get_release_asset()
+    candidate = _verified_installed_executable(install_root / _platform_key(), asset)
     if candidate is not None:
         return _describe_executable(candidate)
 
     raise LlamaExecutableNotFound(
         "no llama.cpp server executable was found; " + llama_install_hint()
     )
+
+
+def find_profile_llama_executable(
+    *,
+    hermes_home: str | Path | None = None,
+) -> LlamaExecutable:
+    """Resolve only the checksum-recorded pinned runtime for this profile."""
+
+    asset = get_release_asset()
+    platform_root = (
+        resolve_data_root(hermes_home) / INSTALL_DIRECTORY / LLAMA_CPP_RELEASE / _platform_key()
+    )
+    candidate = _verified_installed_executable(platform_root, asset)
+    if candidate is None:
+        raise LlamaExecutableNotFound(
+            "the profile-pinned llama.cpp runtime is missing or changed; "
+            "run `hermes brain server install --force`"
+        )
+    return _describe_executable(candidate)
 
 
 def install_llama_cpp(
@@ -291,7 +352,7 @@ def install_llama_cpp(
     data_root.mkdir(parents=True, exist_ok=True)
 
     with _operation_lock(data_root):
-        existing = _find_installed_executable(platform_root)
+        existing = _verified_installed_executable(platform_root, asset)
         if existing is not None and not force:
             return _describe_executable(existing)
 
@@ -309,12 +370,16 @@ def install_llama_cpp(
                     f"official asset {asset.name} contained neither llama nor llama-server"
                 )
             _make_executable(installed)
+            relative_executable = installed.relative_to(staging).as_posix()
             _write_json_atomic(
                 staging / "install.json",
                 {
                     "release": LLAMA_CPP_RELEASE,
                     "asset": asset.name,
                     "sha256": asset.sha256,
+                    "executable": relative_executable,
+                    "executable_sha256": _sha256_file(installed),
+                    "files": _artifact_tree_manifest(staging),
                     "installed_at": _utc_now(),
                 },
             )
@@ -348,6 +413,11 @@ def build_server_command(
     host: str = DEFAULT_HOST,
     port: int = DEFAULT_PORT,
     extra_args: Sequence[str] = (),
+    model_path: str | Path | None = None,
+    model_sha256: str | None = None,
+    lora_adapter_path: str | Path | None = None,
+    lora_adapter_sha256: str | None = None,
+    lora_init_without_apply: bool = False,
 ) -> list[str]:
     """Build an argv-only, loopback-bound llama.cpp server command."""
 
@@ -360,20 +430,31 @@ def build_server_command(
     normalized_port = _validate_port(port)
     normalized_model = _validate_model(model)
     extras = _validate_extra_args(extra_args)
+    local_model_path, _local_model_sha256 = _validate_gguf_artifact(
+        model_path,
+        model_sha256,
+        path_option="model_path",
+        sha256_option="model_sha256",
+        label="local model",
+    )
+    adapter_path, _adapter_sha256 = _validate_lora_adapter(
+        lora_adapter_path,
+        lora_adapter_sha256,
+        init_without_apply=lora_init_without_apply,
+    )
     command = [resolved.path]
     if resolved.style == "llama":
         command.append("serve")
-    command.extend(
-        [
-            "-hf",
-            normalized_model,
-            "--host",
-            normalized_host,
-            "--port",
-            str(normalized_port),
-            *extras,
-        ]
-    )
+    if local_model_path is None:
+        command.extend(["-hf", normalized_model])
+    else:
+        command.extend(["-m", local_model_path, "--alias", normalized_model])
+    command.extend(["--host", normalized_host, "--port", str(normalized_port)])
+    if adapter_path is not None:
+        command.extend(["--lora", adapter_path])
+        if lora_init_without_apply:
+            command.append("--lora-init-without-apply")
+    command.extend(extras)
     return command
 
 
@@ -386,6 +467,11 @@ def start_llama_server(
     host: str = DEFAULT_HOST,
     port: int = DEFAULT_PORT,
     extra_args: Sequence[str] = (),
+    model_path: str | Path | None = None,
+    model_sha256: str | None = None,
+    lora_adapter_path: str | Path | None = None,
+    lora_adapter_sha256: str | None = None,
+    lora_init_without_apply: bool = False,
     wait_ready_seconds: float = 0.0,
 ) -> LlamaServerStatus:
     """Start a detached managed server; ``-hf`` downloads the model as needed."""
@@ -404,10 +490,27 @@ def start_llama_server(
         host=host,
         port=port,
         extra_args=extra_args,
+        model_path=model_path,
+        model_sha256=model_sha256,
+        lora_adapter_path=lora_adapter_path,
+        lora_adapter_sha256=lora_adapter_sha256,
+        lora_init_without_apply=lora_init_without_apply,
     )
     normalized_host = _normalize_loopback_host(host)
     normalized_port = _validate_port(port)
     normalized_model = _validate_model(model)
+    normalized_model_path = None
+    normalized_model_sha256 = None
+    if model_path is not None:
+        normalized_model_path = command[command.index("-m") + 1]
+        assert model_sha256 is not None  # validated by build_server_command
+        normalized_model_sha256 = model_sha256.strip().lower()
+    normalized_adapter_path = None
+    normalized_adapter_sha256 = None
+    if lora_adapter_path is not None:
+        normalized_adapter_path = command[command.index("--lora") + 1]
+        assert lora_adapter_sha256 is not None  # validated by build_server_command
+        normalized_adapter_sha256 = lora_adapter_sha256.strip().lower()
     wait_ready_seconds = _validate_timeout(wait_ready_seconds, "wait_ready_seconds", maximum=3600)
     state_path = data_root / STATE_FILENAME
     log_path = data_root / LOG_FILENAME
@@ -428,12 +531,9 @@ def start_llama_server(
                 f"loopback port {normalized_host}:{normalized_port} is already in use"
             )
 
-        environment = os.environ.copy()
-        for name in _PROTECTED_ENVIRONMENT:
-            environment.pop(name, None)
         cache_root = data_root / "cache"
         cache_root.mkdir(parents=True, exist_ok=True)
-        environment["LLAMA_CACHE"] = str(cache_root)
+        environment = _server_environment(cache_root)
         popen_options: dict[str, Any] = {
             "stdin": subprocess.DEVNULL,
             "stderr": subprocess.STDOUT,
@@ -469,10 +569,14 @@ def start_llama_server(
             "host": normalized_host,
             "port": normalized_port,
             "model": normalized_model,
+            "model_path": normalized_model_path,
+            "model_sha256": normalized_model_sha256,
             "executable": str(Path(resolved.path).resolve()),
             "started_at": started_at,
             "log_path": str(log_path),
             "command": command,
+            "lora_adapter_path": normalized_adapter_path,
+            "lora_adapter_sha256": normalized_adapter_sha256,
         }
         try:
             _write_json_atomic(state_path, state)
@@ -491,10 +595,22 @@ def start_llama_server(
             )
 
     if wait_ready_seconds:
-        return wait_for_llama_server(
-            hermes_home=hermes_home,
-            timeout_seconds=wait_ready_seconds,
-        )
+        try:
+            return wait_for_llama_server(
+                hermes_home=hermes_home,
+                timeout_seconds=wait_ready_seconds,
+            )
+        except BaseException:
+            with contextlib.suppress(LlamaServerError):
+                current = get_llama_server_status(hermes_home=hermes_home)
+                if (
+                    current.pid == process.pid
+                    and current.executable is not None
+                    and Path(current.executable).resolve() == Path(resolved.path).resolve()
+                ):
+                    _terminate_spawned_process(process)
+                    state_path.unlink(missing_ok=True)
+            raise
     return get_llama_server_status(hermes_home=hermes_home)
 
 
@@ -616,6 +732,14 @@ def _status_from_state(
     model = _validate_model(_state_string(state, "model"))
     executable = _state_string(state, "executable")
     started_at = _state_string(state, "started_at")
+    model_path, model_sha256 = _state_gguf_artifact(
+        state,
+        state_path,
+        path_key="model_path",
+        sha256_key="model_sha256",
+        label="model",
+    )
+    adapter_path, adapter_sha256 = _state_lora_adapter(state, state_path)
     command_value = state.get("command")
     if not isinstance(command_value, list) or not all(
         isinstance(item, str) for item in command_value
@@ -638,6 +762,10 @@ def _status_from_state(
             state_path,
             tuple(command_value),
             f"managed llama.cpp PID {pid} is not running",
+            lora_adapter_path=adapter_path,
+            lora_adapter_sha256=adapter_sha256,
+            model_path=model_path,
+            model_sha256=model_sha256,
         )
     if not _process_identity_matches(pid, executable):
         return LlamaServerStatus(
@@ -654,6 +782,10 @@ def _status_from_state(
             state_path,
             tuple(command_value),
             f"PID {pid} does not match stored executable {executable}",
+            lora_adapter_path=adapter_path,
+            lora_adapter_sha256=adapter_sha256,
+            model_path=model_path,
+            model_sha256=model_sha256,
         )
     ready = _endpoint_ready(host, port)
     return LlamaServerStatus(
@@ -669,6 +801,10 @@ def _status_from_state(
         log_path,
         state_path,
         tuple(command_value),
+        lora_adapter_path=adapter_path,
+        lora_adapter_sha256=adapter_sha256,
+        model_path=model_path,
+        model_sha256=model_sha256,
     )
 
 
@@ -860,6 +996,88 @@ def _find_installed_executable(root: Path) -> Path | None:
     return None
 
 
+def _verified_installed_executable(
+    platform_root: Path,
+    asset: LlamaReleaseAsset,
+) -> Path | None:
+    manifest_path = platform_root / "install.json"
+    try:
+        if manifest_path.stat().st_size > MAX_INSTALL_MANIFEST_BYTES:
+            return None
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if not isinstance(manifest, dict) or (
+            manifest.get("release") != LLAMA_CPP_RELEASE
+            or manifest.get("asset") != asset.name
+            or manifest.get("sha256") != asset.sha256
+        ):
+            return None
+        relative = manifest.get("executable")
+        expected_sha256 = manifest.get("executable_sha256")
+        files = manifest.get("files")
+        if (
+            not isinstance(relative, str)
+            or not isinstance(expected_sha256, str)
+            or not isinstance(files, dict)
+            or not 1 <= len(files) <= MAX_INSTALL_FILES
+        ):
+            return None
+        actual_files = _artifact_tree_manifest(platform_root)
+        if files != actual_files:
+            return None
+        executable = (platform_root / relative).resolve()
+        if not executable.is_relative_to(platform_root.resolve()) or not executable.is_file():
+            return None
+        if _sha256_file(executable) != expected_sha256:
+            return None
+        return executable
+    except (OSError, UnicodeError, json.JSONDecodeError, RecursionError, RuntimeError, ValueError):
+        return None
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _artifact_tree_manifest(root: Path) -> dict[str, dict[str, Any]]:
+    files: dict[str, dict[str, Any]] = {}
+    resolved_root = root.resolve()
+    for path in sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix()):
+        if path.name == "install.json" and path.parent == root:
+            continue
+        relative = path.relative_to(root).as_posix()
+        if path.is_symlink():
+            raw_target = os.readlink(path)
+            normalized_target = raw_target.replace("\\", "/")
+            target = PurePosixPath(normalized_target)
+            if (
+                not normalized_target
+                or target.is_absolute()
+                or "\x00" in normalized_target
+                or (target.parts and target.parts[0].endswith(":"))
+            ):
+                raise OSError(f"runtime tree contains an unsafe symlink: {path}")
+            resolved_target = path.resolve(strict=True)
+            if not resolved_target.is_relative_to(resolved_root) or not resolved_target.is_file():
+                raise OSError(f"runtime symlink leaves the installation root: {path}")
+            files[relative] = {"type": "symlink", "target": normalized_target}
+            if len(files) > MAX_INSTALL_FILES:
+                raise OSError("runtime tree contains too many files")
+            continue
+        if not path.is_file():
+            continue
+        files[relative] = {
+            "bytes": path.stat().st_size,
+            "sha256": _sha256_file(path),
+        }
+        if len(files) > MAX_INSTALL_FILES:
+            raise OSError("runtime tree contains too many files")
+    return files
+
+
 def _make_executable(path: Path) -> None:
     if os.name != "nt":
         path.chmod(path.stat().st_mode | stat.S_IXUSR)
@@ -954,12 +1172,95 @@ def _validate_extra_args(extra_args: Sequence[str]) -> list[str]:
     for raw in extra_args:
         value = str(raw)
         option = value.split("=", 1)[0]
-        if option in _PROTECTED_SERVER_OPTIONS:
+        if option in _PROTECTED_SERVER_OPTIONS or option.startswith("--lora-"):
             raise LlamaConfigurationError(f"extra_args cannot override protected option {option}")
         if "\x00" in value:
             raise LlamaConfigurationError("extra_args cannot contain NUL bytes")
         result.append(value)
     return result
+
+
+def _validate_lora_adapter(
+    adapter_path: str | Path | None,
+    expected_sha256: str | None,
+    *,
+    init_without_apply: bool,
+) -> tuple[str | None, str | None]:
+    if not isinstance(init_without_apply, bool):
+        raise LlamaConfigurationError("lora_init_without_apply must be a boolean")
+    if (adapter_path is None) != (expected_sha256 is None):
+        raise LlamaConfigurationError(
+            "lora_adapter_path and lora_adapter_sha256 must be provided together"
+        )
+    if adapter_path is None:
+        if init_without_apply:
+            raise LlamaConfigurationError("lora_init_without_apply requires a LoRA adapter")
+        return None, None
+
+    return _validate_gguf_artifact(
+        adapter_path,
+        expected_sha256,
+        path_option="lora_adapter_path",
+        sha256_option="lora_adapter_sha256",
+        label="LoRA adapter",
+    )
+
+
+def _validate_gguf_artifact(
+    artifact_path: str | Path | None,
+    expected_sha256: str | None,
+    *,
+    path_option: str,
+    sha256_option: str,
+    label: str,
+) -> tuple[str | None, str | None]:
+    if (artifact_path is None) != (expected_sha256 is None):
+        raise LlamaConfigurationError(
+            f"{path_option} and {sha256_option} must be provided together"
+        )
+    if artifact_path is None:
+        return None, None
+
+    if not isinstance(expected_sha256, str):  # paired above; keeps type narrowing explicit
+        raise LlamaConfigurationError(f"{sha256_option} must be a 64-character SHA256")
+    normalized_sha256 = expected_sha256.strip().lower()
+    if len(normalized_sha256) != 64 or any(
+        character not in "0123456789abcdef" for character in normalized_sha256
+    ):
+        raise LlamaConfigurationError(f"{sha256_option} must be a 64-character SHA256")
+
+    try:
+        raw_path = os.fspath(artifact_path)
+    except TypeError as exc:
+        raise LlamaConfigurationError(f"{path_option} must be an absolute .gguf path") from exc
+    if not isinstance(raw_path, str) or "\x00" in raw_path:
+        raise LlamaConfigurationError(f"{path_option} must be an absolute .gguf path")
+    candidate = Path(raw_path)
+    if not candidate.is_absolute():
+        raise LlamaConfigurationError(f"{path_option} must be absolute")
+    if candidate.suffix.lower() != ".gguf":
+        raise LlamaConfigurationError(f"{path_option} must name a .gguf file")
+    try:
+        metadata = candidate.lstat()
+    except OSError as exc:
+        raise LlamaConfigurationError(f"{label} does not exist: {candidate}") from exc
+    if candidate.is_symlink() or not stat.S_ISREG(metadata.st_mode):
+        raise LlamaConfigurationError(f"{path_option} must be a regular file")
+    try:
+        resolved = candidate.resolve(strict=True)
+        digest = hashlib.sha256()
+        with resolved.open("rb") as handle:
+            while chunk := handle.read(1024 * 1024):
+                digest.update(chunk)
+    except OSError as exc:
+        raise LlamaConfigurationError(f"cannot read {label} {candidate}: {exc}") from exc
+    actual_sha256 = digest.hexdigest()
+    if actual_sha256 != normalized_sha256:
+        raise LlamaConfigurationError(
+            f"{label} SHA256 mismatch for {resolved}: "
+            f"expected {normalized_sha256}, got {actual_sha256}"
+        )
+    return str(resolved), normalized_sha256
 
 
 def _validate_timeout(value: float, name: str, *, minimum: float = 0.0, maximum: float) -> float:
@@ -978,9 +1279,12 @@ def _read_state(path: Path) -> dict[str, Any] | None:
     if not path.exists():
         return None
     try:
-        with path.open(encoding="utf-8") as handle:
-            state = json.load(handle)
-    except (OSError, json.JSONDecodeError) as exc:
+        if path.stat().st_size > MAX_STATE_BYTES:
+            raise LlamaServerStateError(f"server state exceeds {MAX_STATE_BYTES} bytes: {path}")
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except LlamaServerStateError:
+        raise
+    except (OSError, UnicodeError, json.JSONDecodeError, RecursionError) as exc:
         raise LlamaServerStateError(f"cannot read server state {path}: {exc}") from exc
     if not isinstance(state, dict):
         raise LlamaServerStateError(f"server state must be a JSON object: {path}")
@@ -994,6 +1298,39 @@ def _state_string(state: dict[str, Any], key: str) -> str:
     if not isinstance(value, str) or not value:
         raise LlamaServerStateError(f"invalid {key!r} in server state")
     return value
+
+
+def _state_lora_adapter(state: dict[str, Any], state_path: Path) -> tuple[str | None, str | None]:
+    return _state_gguf_artifact(
+        state,
+        state_path,
+        path_key="lora_adapter_path",
+        sha256_key="lora_adapter_sha256",
+        label="LoRA adapter",
+    )
+
+
+def _state_gguf_artifact(
+    state: dict[str, Any],
+    state_path: Path,
+    *,
+    path_key: str,
+    sha256_key: str,
+    label: str,
+) -> tuple[str | None, str | None]:
+    artifact_path = state.get(path_key)
+    artifact_sha256 = state.get(sha256_key)
+    if artifact_path is None and artifact_sha256 is None:
+        return None, None
+    if not isinstance(artifact_path, str) or not isinstance(artifact_sha256, str):
+        raise LlamaServerStateError(f"invalid {label} metadata in {state_path}")
+    if not Path(artifact_path).is_absolute() or Path(artifact_path).suffix.lower() != ".gguf":
+        raise LlamaServerStateError(f"invalid {label} path in {state_path}")
+    if len(artifact_sha256) != 64 or any(
+        character not in "0123456789abcdef" for character in artifact_sha256
+    ):
+        raise LlamaServerStateError(f"invalid {label} SHA256 in {state_path}")
+    return artifact_path, artifact_sha256
 
 
 def _state_integer(state: dict[str, Any], key: str, *, minimum: int, maximum: int) -> int:
@@ -1026,6 +1363,11 @@ def _operation_lock(data_root: Path) -> Iterator[None]:
     try:
         descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     except FileExistsError:
+        owner_pid = _read_lock_pid(lock_path)
+        if owner_pid is not None and _pid_alive(owner_pid):
+            raise LlamaServerStateError(
+                f"another llama.cpp operation holds {lock_path}; try again shortly"
+            ) from None
         try:
             age = time.time() - lock_path.stat().st_mtime
         except OSError:
@@ -1050,6 +1392,35 @@ def _operation_lock(data_root: Path) -> Iterator[None]:
         if descriptor >= 0:
             os.close(descriptor)
         lock_path.unlink(missing_ok=True)
+
+
+def _read_lock_pid(path: Path) -> int | None:
+    try:
+        with path.open("rb") as handle:
+            raw = handle.read(256)
+    except OSError:
+        return None
+    prefix = b"pid="
+    if not raw.startswith(prefix):
+        return None
+    token = raw[len(prefix) :].split(maxsplit=1)[0]
+    try:
+        pid = int(token)
+    except ValueError:
+        return None
+    return pid if 0 < pid <= 2**31 - 1 else None
+
+
+def _server_environment(cache_root: Path) -> dict[str, str]:
+    environment = {
+        name: value
+        for name, value in os.environ.items()
+        if name.upper() in _SERVER_ENVIRONMENT_ALLOWLIST
+    }
+    for name in _PROTECTED_ENVIRONMENT:
+        environment.pop(name, None)
+    environment["LLAMA_CACHE"] = str(cache_root)
+    return environment
 
 
 def _pid_alive(pid: int) -> bool:
