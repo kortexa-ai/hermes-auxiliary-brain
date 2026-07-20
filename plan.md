@@ -469,3 +469,10 @@ without changing the plugin.
   helper. Reframed the meaningful corrected-data cycle as the first real
   learning milestone rather than pretending the synthetic smoke was useful
   training. Prepared the annotated `v0.5.0` release and a clean macOS handoff.
+- 2026-07-20: Published the annotated `v0.5.0` tag and
+  [GitHub Release](https://github.com/kortexa-ai/hermes-auxiliary-brain/releases/tag/v0.5.0)
+  from commit `30ffaf4`. The main and tag CI matrices passed on Python
+  3.11/3.12/3.13; a clean Apple Silicon checkout passed all 361 tests, loaded
+  the migrated SQLite state, started the pinned managed LFM server, and passed
+  every doctor check. The training environments remain intentionally
+  uninstalled until current-contract corrected data is ready.
