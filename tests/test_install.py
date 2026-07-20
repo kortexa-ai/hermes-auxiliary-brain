@@ -26,6 +26,9 @@ def make_source(root: Path) -> Path:
     docs = root / "docs"
     docs.mkdir()
     (docs / "training.md").write_text("# Training\n", encoding="utf-8")
+    scripts = root / "scripts"
+    scripts.mkdir()
+    (scripts / "backup_brain_db.py").write_text("VALUE = 1\n", encoding="utf-8")
     return root
 
 
@@ -65,6 +68,7 @@ def test_copy_runtime_installs_only_runtime_paths(tmp_path) -> None:
     assert (destination / "auxiliary_brain" / "runtime.py").is_file()
     assert (destination / "dashboard" / "manifest.json").is_file()
     assert (destination / "docs" / "training.md").is_file()
+    assert (destination / "scripts" / "backup_brain_db.py").is_file()
     assert not (destination / "auxiliary_brain" / "__pycache__").exists()
     assert not (destination / "tests").exists()
 

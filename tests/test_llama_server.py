@@ -488,7 +488,7 @@ def test_runtime_manifest_rejects_escape_and_verifier_handles_link_loop(tmp_path
     outside = tmp_path / "outside.so"
     outside.write_bytes(b"outside")
     link = root / "libllama.so"
-    link.symlink_to(outside)
+    link.symlink_to("../outside.so")
 
     with pytest.raises(OSError, match="installation root"):
         llama_server._artifact_tree_manifest(root)

@@ -24,7 +24,7 @@
    The surface stays off by default. Only send `/brain` **between turns**, while
    Hermes is idle; current Hermes versions may route a dynamic plugin command
    received during a busy turn to the main model as follow-up text. The host fix
-   is still a draft upstream. The fixed local commands are:
+   is still open upstream. The fixed local commands are:
 
    ```text
    /brain help

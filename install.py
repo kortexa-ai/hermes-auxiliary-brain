@@ -27,6 +27,7 @@ RUNTIME_PATHS = (
     "auxiliary_brain",
     "dashboard",
     "docs",
+    "scripts",
     "after-install.md",
 )
 

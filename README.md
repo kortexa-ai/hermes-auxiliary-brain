@@ -262,7 +262,7 @@ multiplex-rejected `/brain` is not safe to send during a busy turn.
 
 The generic host fix is tracked by
 [issue #58559](https://github.com/NousResearch/hermes-agent/issues/58559) and
-[draft PR #58591](https://github.com/NousResearch/hermes-agent/pull/58591).
+[PR #58591](https://github.com/NousResearch/hermes-agent/pull/58591).
 Until that fix lands, the acknowledgement flag is mandatory, the default stays
 off, and the local `hermes brain ...` CLI remains the strongest privacy
 boundary. The tiny goblin can answer the door; just do not ring while Hermes is
@@ -486,7 +486,7 @@ so `hermes plugins update auxiliary-brain` follows the latest `main`. For a
 reproducible pinned installation, clone a tag and run the checkout installer:
 
 ```console
-git clone --branch v0.4.0 --depth 1 https://github.com/kortexa-ai/hermes-auxiliary-brain.git
+git clone --branch v0.5.0 --depth 1 https://github.com/kortexa-ai/hermes-auxiliary-brain.git
 cd hermes-auxiliary-brain
 python install.py
 ```
@@ -518,20 +518,44 @@ Removing the plugin code intentionally leaves
 `HERMES_HOME/auxiliary-brain/` alone. Delete or archive that data separately
 only when you mean to.
 
+To continue the same learning history on another machine, clone or install the
+plugin there and migrate only a consistent `brain.db` backup. Recreate local
+model runtimes and training environments on the destination; they are
+platform-specific. See [Moving learning state to another machine](docs/training.md#moving-learning-state-to-another-machine).
+
 ## Develop
 
 The normal plugin runtime has no third-party Python dependency. Optional
 training creates separate profile-local environments containing the pinned ML
-stack. Tests use `pytest`:
+stack. Create a development environment with Python 3.11 or newer. On macOS or
+Linux:
+
+```console
+git clone https://github.com/kortexa-ai/hermes-auxiliary-brain.git
+cd hermes-auxiliary-brain
+python3.11 -m venv .venv
+. .venv/bin/activate
+python -m pip install pytest fastapi httpx ruff
+```
+
+On Windows, replace the environment commands with
+`py -3.11 -m venv .venv` and `.\.venv\Scripts\Activate.ps1`. Then run:
 
 ```console
 python -m pytest
-python -m compileall -q auxiliary_brain __init__.py install.py
+python -m ruff check .
+python -m ruff format --check .
+python -m compileall -q auxiliary_brain dashboard/plugin_api.py scripts __init__.py install.py
 ```
 
-For the plugin-discovery integration test, use the Python environment from an
-adjacent `hermes-agent` checkout. See [plan.md](plan.md) for the current design
-decisions and deferred work.
+For integration against an adjacent `hermes-agent` checkout:
+
+```console
+HERMES_AGENT_ROOT=../hermes-agent python -m pytest tests/test_dashboard_auth_integration.py tests/test_hermes_integration.py -q
+```
+
+In PowerShell, set `$env:HERMES_AGENT_ROOT='..\hermes-agent'` first. See
+[plan.md](plan.md) for current decisions and deferred work.
 
 ## License
 

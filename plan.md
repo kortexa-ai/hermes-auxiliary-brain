@@ -1,9 +1,25 @@
 # Hermes Auxiliary Brain - Working Plan
 
-Last updated: 2026-07-17
+Last updated: 2026-07-20
 
 This file is the rude-raccoon recovery point. It records what we are building,
 why the design looks this way, and what has actually been completed.
+
+## Resume here
+
+- `v0.5.0` is the current release line. The annotated `v0.5.0` tag is the
+  reproducible code checkpoint; `main` remains the development branch used by
+  Hermes' native Git installer.
+- The complete explicit LoRA lifecycle is implemented: prepare, install, run,
+  convert, evaluate, promote, rollback, status, and bounded logs.
+- A consistent SQLite backup helper and machine-migration procedure preserve
+  `brain.db` while platform-specific runtimes and ML environments are rebuilt.
+- The synthetic two-step hardware smoke proves the infrastructure but is
+  permanently non-promotable. The next learning milestone is a fresh,
+  meaningful corrected-data cycle on the intended training machine.
+- Before changing code, run the validation commands in `AGENTS.md` and inspect
+  the latest GitHub CI result. Resolve the release checkpoint with
+  `git rev-parse v0.5.0^{commit}` instead of copying a possibly stale SHA here.
 
 ## Outcome
 
@@ -189,7 +205,7 @@ without changing the plugin.
     settings do not remove the risk.
   - Upstream tracks the generic busy-session fix in
     [issue #58559](https://github.com/NousResearch/hermes-agent/issues/58559) and
-    [draft PR #58591](https://github.com/NousResearch/hermes-agent/pull/58591).
+    [PR #58591](https://github.com/NousResearch/hermes-agent/pull/58591).
     Keep the opt-in acknowledgement until the released Hermes host provides
     and the plugin verifies that busy-safe contract; do not carry a private
     host monkey patch.
@@ -229,8 +245,8 @@ without changing the plugin.
   - Never expose llama.cpp directly to the internet. Remote clients talk to an
     authenticated Hermes surface; Hermes talks to the loopback model.
 
-- [ ] **14. Add an explicit training and promotion pipeline (`v0.5.0`)** - larger workstream
-  - **Local implementation checkpoint (not pushed or released):**
+- [x] **14. Add an explicit training and promotion pipeline (`v0.5.0`)** - complete
+  - **Released implementation:**
     - [x] Added dependency-free readiness inspection and content-addressed
       train/holdout bundles with exact task messages, current-contract checks,
       deterministic normalized-input grouping, secret lint, explicit review of
@@ -268,8 +284,16 @@ without changing the plugin.
       training took 1.4 seconds after model load, conversion produced a
       494,592-byte GGUF adapter, and all eight candidate holdout calls were
       schema-valid. The toy accuracy remained zero, as expected from two steps.
-    - [ ] Run a meaningful corrected-data training/evaluation cycle before
-      declaring `v0.5.0` releasable. No push, tag, or release is authorized yet.
+    - [ ] Run a meaningful corrected-data training/evaluation cycle as the
+      first real learning milestone. This is deliberately separate from
+      releasing the explicit, guarded training infrastructure in `v0.5.0`;
+      no adapter may be promoted without its own passing evaluation.
+      The cycle is complete only when a non-experimental bundle passes the
+      default split and all-task gates, a non-smoke train/convert/evaluate run
+      produces schema-valid outputs without overall or per-task regression,
+      at least one predeclared aggregate metric improves, and promotion plus
+      rollback are verified. Record only aggregate metrics, revisions, hashes,
+      hardware, and timings; never commit private source rows or artifacts.
   - The current correction/export/evaluate loop is the data foundation, but
     the managed llama.cpp server is an inference runtime, not a trainer.
     Do not productize llama.cpp's own finetune example: upstream describes it
@@ -390,7 +414,7 @@ without changing the plugin.
   training. Scoped the low-risk operator work to v0.3.0, recorded the Hermes
   busy-plugin-command dependency, and separated training into an explicit
   evaluate/promote/rollback workstream.
-- 2026-07-16: Verified upstream issue #58559 and draft PR #58591 already cover
+- 2026-07-16: Verified upstream issue #58559 and PR #58591 already cover
   the generic busy-session plugin/skill command gap, so no duplicate Hermes
   branch or PR was opened. Committed authenticated status/check-in API work to
   v0.3.0 and moved both training status and bundle preparation to v0.5.0.
@@ -430,13 +454,18 @@ without changing the plugin.
   first 256-token attempt correctly failed before training because truncation
   removed every assistant token; after measuring the 327-token examples, the
   default moved to 512 and the CUDA train/convert/load/schema-validation path
-  passed. The synthetic candidate remains non-promotable. No push, tag, or
-  release has been made; a meaningful corrected-data cycle remains required.
+  passed. The synthetic candidate remains permanently non-promotable; a
+  meaningful corrected-data cycle remains the next real learning milestone.
 - 2026-07-17: Completed the memory-conscious v0.5 hardening pass without
   loading the model again: exact model/converter/runtime provenance, safe
   subprocess environments and parent-lifetime handling, bounded deterministic
   evaluation, immutable deployment validation, and fresh-profile packaging.
   The complete plugin plus adjacent-Hermes suite is green (353 passed, three
   platform-only skips), and independent security/final reviews found no
-  remaining ship blocker. Changes remain local on `main`; no push, tag, or
-  release was made.
+  remaining implementation blocker.
+- 2026-07-20: Published the v0.5 implementation to `main`, fixed the Linux
+  symlink-containment test so remote CI exercises the intended branch, and
+  added a cold-clone development guide plus a consistent SQLite migration
+  helper. Reframed the meaningful corrected-data cycle as the first real
+  learning milestone rather than pretending the synthetic smoke was useful
+  training. Prepared the annotated `v0.5.0` release and a clean macOS handoff.

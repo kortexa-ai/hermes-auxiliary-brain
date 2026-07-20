@@ -37,6 +37,44 @@ terms before distributing a model or derivative. The plugin itself and
 [llama.cpp](https://github.com/ggml-org/llama.cpp) are MIT licensed; installed
 Python dependencies retain their own licenses.
 
+## Moving learning state to another machine
+
+The repository contains code, not learned state. The portable source of the
+learning history is `HERMES_HOME/auxiliary-brain/brain.db`; it may contain
+private input and corrected output in plain text.
+
+1. Install the same or newer plugin release on the destination. Run
+   `hermes brain status --json` on each machine to confirm the active database
+   path. Stop Hermes on the destination before replacing an existing database.
+2. From a plugin checkout or installed plugin directory, create a consistent
+   SQLite snapshot. The helper is safe while the source gateway is running and
+   prints the backup's byte size and SHA-256 without printing row contents:
+
+   ```console
+   python scripts/backup_brain_db.py /path/to/brain.db brain-transfer.db
+   ```
+
+3. Transfer that one snapshot over an encrypted channel. Create the destination
+   `HERMES_HOME/auxiliary-brain/` directory with owner-only permissions, keep
+   any existing destination database as a separate backup, and place the
+   snapshot there as `brain.db`. Set directory mode `0700` and file mode `0600`
+   on macOS or Linux.
+4. Compare SHA-256 on both machines, then verify the destination:
+
+   ```console
+   sqlite3 /path/to/brain.db "PRAGMA integrity_check; PRAGMA foreign_key_check;"
+   hermes brain train status --json
+   ```
+
+Do not copy `envs/`, managed llama.cpp binaries, caches, PID/lock files, or
+`deployment.json`; recreate those platform-specific pieces with `hermes brain
+server install` and `hermes brain train install`. New bundles can be generated
+from the database, but an exact old bundle also depends on the same plugin
+release and task contracts. Existing run metadata contains absolute paths and
+is not currently relocatable, so start a new run on the destination. Migration
+preserves historical rows but does not make rows with obsolete task contracts
+eligible for a new training bundle.
+
 ## Hardware and storage
 
 An NVIDIA GPU is the happy path. The installer detects `nvidia-smi` and uses
