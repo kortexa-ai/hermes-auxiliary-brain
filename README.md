@@ -551,10 +551,12 @@ python -m compileall -q auxiliary_brain dashboard/plugin_api.py scripts __init__
 For integration against an adjacent `hermes-agent` checkout:
 
 ```console
-HERMES_AGENT_ROOT=../hermes-agent python -m pytest tests/test_dashboard_auth_integration.py tests/test_hermes_integration.py -q
+HERMES_AGENT_ROOT=../hermes-agent ../hermes-agent/venv/bin/python -m pytest tests/test_dashboard_auth_integration.py tests/test_hermes_integration.py -q
 ```
 
-In PowerShell, set `$env:HERMES_AGENT_ROOT='..\hermes-agent'` first. See
+Use `.venv` instead when that is the adjacent checkout's environment. In
+PowerShell, set `$env:HERMES_AGENT_ROOT='..\hermes-agent'` and invoke
+`..\hermes-agent\venv\Scripts\python.exe` (or its `.venv` equivalent). See
 [plan.md](plan.md) for current decisions and deferred work.
 
 ## License

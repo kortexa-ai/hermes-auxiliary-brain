@@ -43,8 +43,12 @@ python -m compileall -q auxiliary_brain dashboard/plugin_api.py scripts __init__
 For integration against an adjacent Hermes checkout:
 
 ```console
-HERMES_AGENT_ROOT=../hermes-agent python -m pytest tests/test_dashboard_auth_integration.py tests/test_hermes_integration.py -q
+HERMES_AGENT_ROOT=../hermes-agent ../hermes-agent/venv/bin/python -m pytest tests/test_dashboard_auth_integration.py tests/test_hermes_integration.py -q
 ```
+
+Use the adjacent checkout's `.venv` instead when that is its environment. On
+Windows, set `$env:HERMES_AGENT_ROOT='..\hermes-agent'` and invoke
+`..\hermes-agent\venv\Scripts\python.exe` (or its `.venv` equivalent).
 
 Do not download or load model weights merely to prove an unrelated code or
 documentation change. Run heavyweight stages sequentially and record only
